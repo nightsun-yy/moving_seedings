@@ -11,6 +11,9 @@ import {
   Thermometer,
 } from 'lucide-react';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import directoryModelUrl from '../../docs/0413.gltf?url';
 
 type SystemMode = 'AUTO' | 'MANUAL' | 'SCANNING';
 type LogType = 'info' | 'success' | 'error';
@@ -45,15 +48,21 @@ type RackSlot = {
   status: RackStatus;
 };
 
-type PlantMesh = THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>;
+type MotionBounds = {
+  minX: number;
+  maxX: number;
+  minDepth: number;
+  maxDepth: number;
+  minHeight: number;
+  maxHeight: number;
+};
 
 type TwinObjects = {
   xCarriage: THREE.Group;
   yCarriage: THREE.Group;
   zEffector: THREE.Group;
-  scanCone: THREE.Mesh<THREE.ConeGeometry, THREE.MeshBasicMaterial>;
-  plantMeshes: Record<string, PlantMesh>;
-  getPlantMat: (status: RackStatus) => THREE.MeshStandardMaterial;
+  scanCone: THREE.Object3D;
+  motionBounds: MotionBounds | null;
 };
 
 type TopologyNode = {
@@ -119,7 +128,14 @@ const INITIAL_RACK_STATE: RackSlot[] = [
   { id: 'C3', x: 2, y: 0, status: 0 },
 ];
 
-const INITIAL_TARGET = { x: 1.5, y: 2.1, z: 0 };
+const DIRECTORY_MODEL_URL = directoryModelUrl;
+const AXIS_LIMITS = {
+  x: 2,
+  y: 2,
+  z: 1,
+} as const;
+const Z_TRAVEL_MM = 180;
+const DIRECTORY_DISPLAY_PALETTE = [0x475569, 0x64748b, 0x38bdf8, 0x22c55e, 0xf59e0b, 0x0f766e];
 
 const STATUS_PILL_STYLES: Record<Tone, string> = {
   online: 'border-cyan-500/30 bg-cyan-500/12 text-cyan-200',
@@ -200,6 +216,161 @@ const disposeMaterial = (material: THREE.Material | THREE.Material[]) => {
   material.dispose();
 };
 
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const mapRange = (value: number, inputMin: number, inputMax: number, outputMin: number, outputMax: number) => {
+  if (inputMax === inputMin) {
+    return outputMin;
+  }
+
+  const ratio = (clamp(value, inputMin, inputMax) - inputMin) / (inputMax - inputMin);
+  return outputMin + (outputMax - outputMin) * ratio;
+};
+
+const modelNeedsDisplayColor = (object: THREE.Object3D) => {
+  const uniqueColors = new Set<string>();
+  let materialCount = 0;
+  let grayscaleCount = 0;
+
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) {
+      return;
+    }
+
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => {
+      if (!(material instanceof THREE.MeshStandardMaterial)) {
+        return;
+      }
+
+      materialCount += 1;
+      uniqueColors.add(material.color.getHexString());
+
+      const maxChannel = Math.max(material.color.r, material.color.g, material.color.b);
+      const minChannel = Math.min(material.color.r, material.color.g, material.color.b);
+      if (maxChannel - minChannel < 0.08) {
+        grayscaleCount += 1;
+      }
+    });
+  });
+
+  return materialCount > 0 && uniqueColors.size <= 3 && grayscaleCount / materialCount > 0.8;
+};
+
+const colorizeMaterial = (material: THREE.Material, colorHex: number) => {
+  const color = new THREE.Color(colorHex);
+  const cloned = material.clone();
+
+  if (cloned instanceof THREE.MeshStandardMaterial) {
+    cloned.color.lerp(color, 0.82);
+    cloned.emissive.copy(color).multiplyScalar(0.035);
+    cloned.metalness = Math.min(cloned.metalness, 0.16);
+    cloned.roughness = Math.max(cloned.roughness, 0.62);
+    return cloned;
+  }
+
+  return new THREE.MeshStandardMaterial({
+    color,
+    emissive: color.clone().multiplyScalar(0.035),
+    metalness: 0.1,
+    roughness: 0.7,
+  });
+};
+
+const applyDirectoryDisplayColors = (object: THREE.Object3D) => {
+  const globalBounds = new THREE.Box3().setFromObject(object);
+  const globalSize = globalBounds.getSize(new THREE.Vector3());
+  const globalCenter = globalBounds.getCenter(new THREE.Vector3());
+  const meshes: Array<{ mesh: THREE.Mesh; center: THREE.Vector3; size: THREE.Vector3 }> = [];
+
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) {
+      return;
+    }
+
+    const meshBounds = new THREE.Box3().setFromObject(child);
+    meshes.push({
+      mesh: child,
+      center: meshBounds.getCenter(new THREE.Vector3()),
+      size: meshBounds.getSize(new THREE.Vector3()),
+    });
+  });
+
+  meshes.sort(
+    (left, right) => left.center.x - right.center.x || left.center.z - right.center.z || right.size.y - left.size.y,
+  );
+
+  meshes.forEach(({ mesh, center, size }, index) => {
+    const isTall = size.y > globalSize.y * 0.42;
+    const isLowerDeck = center.y < globalBounds.min.y + globalSize.y * 0.3;
+    const isRightSide = center.x > globalCenter.x;
+    const isFarSide = center.z > globalCenter.z;
+
+    let colorHex = DIRECTORY_DISPLAY_PALETTE[index % DIRECTORY_DISPLAY_PALETTE.length];
+    if (isTall) {
+      colorHex = isFarSide ? 0x16a34a : 0x22c55e;
+    } else if (isLowerDeck) {
+      colorHex = isRightSide ? 0x334155 : 0x475569;
+    } else if (isRightSide) {
+      colorHex = 0xf59e0b;
+    } else {
+      colorHex = 0x38bdf8;
+    }
+
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map((material) => colorizeMaterial(material, colorHex));
+      return;
+    }
+
+    mesh.material = colorizeMaterial(mesh.material, colorHex);
+  });
+};
+
+const normalizeModel = (object: THREE.Object3D, targetMaxSize: number) => {
+  const bounds = new THREE.Box3().setFromObject(object);
+  const size = bounds.getSize(new THREE.Vector3());
+  const maxDimension = Math.max(size.x, size.y, size.z, 1);
+  const scale = targetMaxSize / maxDimension;
+
+  object.scale.setScalar(scale);
+  object.position.set(
+    -((bounds.min.x + bounds.max.x) * scale) / 2,
+    -(bounds.min.y * scale),
+    -((bounds.min.z + bounds.max.z) * scale) / 2,
+  );
+
+  return new THREE.Box3().setFromObject(object);
+};
+
+const fitCameraToObject = (
+  camera: THREE.PerspectiveCamera,
+  object: THREE.Object3D,
+  aspect: number,
+  controls?: OrbitControls,
+) => {
+  const bounds = new THREE.Box3().setFromObject(object);
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+  const radius = Math.max(sphere.radius, 1);
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = (radius / Math.sin(fov / 2)) * 1.1;
+
+  camera.aspect = aspect;
+  camera.near = Math.max(0.1, distance / 100);
+  camera.far = distance * 12;
+  camera.position.set(
+    sphere.center.x + distance * 0.85,
+    sphere.center.y + radius * 0.55,
+    sphere.center.z + distance * 0.9,
+  );
+  if (controls) {
+    controls.target.copy(sphere.center);
+    controls.update();
+  } else {
+    camera.lookAt(sphere.center.x, sphere.center.y, sphere.center.z);
+  }
+  camera.updateProjectionMatrix();
+};
+
 const App = () => {
   const [systemMode, setSystemMode] = useState<SystemMode>('AUTO');
   const [sysLog, setSysLog] = useState<SysLogEntry[]>(INITIAL_LOGS);
@@ -210,7 +381,7 @@ const App = () => {
   const isConnected = true;
   const mountRef = useRef<HTMLDivElement | null>(null);
   const twinRef = useRef<TwinObjects | null>(null);
-  const motionTargetRef = useRef(INITIAL_TARGET);
+  const motionTargetRef = useRef<ArmPosition>({ x: 0, y: 0, z: 0 });
 
   const addLog = (msg: string, type: LogType = 'info') => {
     setSysLog((prev) => [{ time: new Date().toLocaleTimeString(), msg, type }, ...prev].slice(0, 6));
@@ -219,6 +390,7 @@ const App = () => {
   const plcOnline = isConnected;
   const axisBusOnline = plcOnline;
   const cameraBusOnline = plcOnline;
+  const zExtended = armPos.z > 0.05;
 
   const topologyNodes: TopologyNode[] = [
     {
@@ -345,222 +517,294 @@ const App = () => {
     let height = mount.clientHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a);
-    scene.fog = new THREE.FogExp2(0x0f172a, 0.02);
+    scene.background = new THREE.Color(0x020617);
+    scene.fog = new THREE.FogExp2(0x020617, 0.012);
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.set(15, 12, 20);
-    camera.lookAt(5, 4, 0);
+    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 1000);
+    camera.position.set(18, 10, 18);
+    camera.lookAt(0, 3, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.domElement.style.touchAction = 'none';
     mount.appendChild(renderer.domElement);
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.enablePan = false;
+    controls.rotateSpeed = 0.72;
+    controls.zoomSpeed = 0.85;
+    controls.minDistance = 10;
+    controls.maxDistance = 38;
+    controls.minPolarAngle = Math.PI * 0.18;
+    controls.maxPolarAngle = Math.PI * 0.48;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
     scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(10, 20, 10);
-    dirLight.castShadow = true;
-    scene.add(dirLight);
+    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x020617, 1.15);
+    scene.add(hemiLight);
 
-    const spotLight = new THREE.SpotLight(0x3b82f6, 2);
-    spotLight.position.set(-5, 10, 15);
-    spotLight.lookAt(5, 4, 0);
-    scene.add(spotLight);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
+    keyLight.position.set(14, 18, 14);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(2048, 2048);
+    scene.add(keyLight);
 
-    const matAluminum = new THREE.MeshStandardMaterial({
-      color: 0x94a3b8,
-      metalness: 0.8,
-      roughness: 0.3,
-    });
-    const matDark = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      metalness: 0.5,
-      roughness: 0.5,
-    });
-    const matRail = new THREE.MeshStandardMaterial({
-      color: 0x64748b,
-      metalness: 0.9,
-      roughness: 0.1,
-    });
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.2);
+    rimLight.position.set(-16, 8, -12);
+    scene.add(rimLight);
 
-    const matEmpty = new THREE.MeshStandardMaterial({ color: 0x334155 });
-    const matGrowing = new THREE.MeshStandardMaterial({
-      color: 0xeab308,
-      emissive: 0xeab308,
-      emissiveIntensity: 0.2,
-    });
-    const matMature = new THREE.MeshStandardMaterial({
-      color: 0x22c55e,
-      emissive: 0x22c55e,
-      emissiveIntensity: 0.2,
-    });
-    const matAlert = new THREE.MeshStandardMaterial({
-      color: 0xef4444,
-      emissive: 0xef4444,
-      emissiveIntensity: 0.4,
-    });
-
-    const getPlantMat = (status: RackStatus) => {
-      if (status === 1) {
-        return matGrowing;
-      }
-      if (status === 2) {
-        return matMature;
-      }
-      if (status === 3) {
-        return matAlert;
-      }
-      return matEmpty;
-    };
-
-    const models = new THREE.Group();
-    scene.add(models);
-
-    const tableGeo = new THREE.BoxGeometry(20, 0.5, 10);
-    const table = new THREE.Mesh(tableGeo, matDark);
-    table.position.set(5, -0.25, 0);
-    table.receiveShadow = true;
-    models.add(table);
-
-    const rackGroup = new THREE.Group();
-    rackGroup.position.set(5, 0, -2);
-    models.add(rackGroup);
-
-    const buildFrame = () => {
-      const frameGeoH = new THREE.BoxGeometry(10, 0.2, 0.2);
-      const frameGeoV = new THREE.BoxGeometry(0.2, 8, 0.2);
-      const frameGeoD = new THREE.BoxGeometry(0.2, 0.2, 3);
-
-      for (const x of [0, 9]) {
-        for (const z of [0, 2]) {
-          const pillar = new THREE.Mesh(frameGeoV, matAluminum);
-          pillar.position.set(x, 4, z);
-          rackGroup.add(pillar);
-        }
-      }
-
-      for (const y of [2, 4.5, 7]) {
-        for (const z of [0, 2]) {
-          const beam = new THREE.Mesh(frameGeoH, matAluminum);
-          beam.position.set(4.5, y, z);
-          rackGroup.add(beam);
-        }
-
-        for (const x of [0, 3, 6, 9]) {
-          const depthBeam = new THREE.Mesh(frameGeoD, matAluminum);
-          depthBeam.position.set(x, y, 1);
-          rackGroup.add(depthBeam);
-        }
-      }
-    };
-    buildFrame();
-
-    const plantMeshes: Record<string, PlantMesh> = {};
-    const trayGeo = new THREE.BoxGeometry(2, 0.1, 2);
-    const plantGeo = new THREE.SphereGeometry(0.6, 16, 16);
-
-    INITIAL_RACK_STATE.forEach((slot) => {
-      const px = slot.x * 3 + 1.5;
-      const py = slot.y * 2.5 + 2.1;
-
-      const tray = new THREE.Mesh(trayGeo, matDark);
-      tray.position.set(px, py, 1);
-      rackGroup.add(tray);
-
-      const plant = new THREE.Mesh(plantGeo, getPlantMat(slot.status));
-      plant.position.set(px, py + 0.4, 1);
-      plant.scale.y = slot.status === 1 ? 0.5 : slot.status === 0 ? 0.01 : 1;
-      rackGroup.add(plant);
-      plantMeshes[slot.id] = plant;
-    });
-
-    const robotGroup = new THREE.Group();
-    robotGroup.position.set(0, 0, 2);
-    models.add(robotGroup);
-
-    const xRailGeo = new THREE.BoxGeometry(11, 0.4, 1);
-    const xRail = new THREE.Mesh(xRailGeo, matAluminum);
-    xRail.position.set(4.5, 0.2, 0);
-    robotGroup.add(xRail);
-
-    const xCarriage = new THREE.Group();
-    xCarriage.position.x = motionTargetRef.current.x;
-    robotGroup.add(xCarriage);
-
-    const xBase = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.5, 1.5), matDark);
-    xBase.position.set(0, 0.6, 0);
-    xCarriage.add(xBase);
-
-    const yPillar = new THREE.Mesh(new THREE.BoxGeometry(0.6, 8, 0.6), matAluminum);
-    yPillar.position.set(0, 4.6, 0);
-    xCarriage.add(yPillar);
-
-    const yCarriage = new THREE.Group();
-    yCarriage.position.y = motionTargetRef.current.y;
-    xCarriage.add(yCarriage);
-
-    const yBase = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1.2), matDark);
-    yBase.position.set(0, 0, 0);
-    yCarriage.add(yBase);
-
-    const zArm = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 3), matRail);
-    zArm.position.set(0, 0, -1);
-    yCarriage.add(zArm);
-
-    const zEffector = new THREE.Group();
-    zEffector.position.z = motionTargetRef.current.z;
-    yCarriage.add(zEffector);
-
-    const fork = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 2), matAluminum);
-    fork.position.set(0, -0.2, -2.5);
-    zEffector.add(fork);
-
-    const cameraBody = new THREE.Mesh(
-      new THREE.BoxGeometry(0.3, 0.3, 0.4),
-      new THREE.MeshStandardMaterial({ color: 0x000000 }),
-    );
-    cameraBody.position.set(0, 0.2, -1.8);
-    zEffector.add(cameraBody);
-
-    const cameraLens = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.1, 0.1, 0.2),
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(18, 80),
       new THREE.MeshStandardMaterial({
-        color: 0x3b82f6,
-        emissive: 0x3b82f6,
-        emissiveIntensity: 0.5,
+        color: 0x0f172a,
+        metalness: 0.08,
+        roughness: 0.92,
       }),
     );
-    cameraLens.rotation.x = Math.PI / 2;
-    cameraLens.position.set(0, 0.2, -2);
-    zEffector.add(cameraLens);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.02;
+    floor.receiveShadow = true;
+    scene.add(floor);
 
-    const scanConeGeo = new THREE.ConeGeometry(1, 2, 16);
-    const scanConeMat = new THREE.MeshBasicMaterial({
-      color: 0x06b6d4,
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0x22d3ee,
       transparent: true,
-      opacity: 0.3,
+      opacity: 0.12,
       side: THREE.DoubleSide,
     });
-    const scanCone = new THREE.Mesh(scanConeGeo, scanConeMat);
-    scanCone.rotation.x = -Math.PI / 2;
-    scanCone.position.set(0, 0.2, -3);
+    const halo = new THREE.Mesh(new THREE.RingGeometry(8.5, 13.5, 64), haloMat);
+    halo.rotation.x = -Math.PI / 2;
+    halo.position.y = 0.03;
+    scene.add(halo);
+
+    const modelPivot = new THREE.Group();
+    scene.add(modelPivot);
+
+    const xCarriage = new THREE.Group();
+    const yCarriage = new THREE.Group();
+    const zEffector = new THREE.Group();
+    modelPivot.add(xCarriage);
+    xCarriage.add(yCarriage);
+    yCarriage.add(zEffector);
+
+    const effectorBodyMat = new THREE.MeshStandardMaterial({
+      color: 0x67e8f9,
+      emissive: 0x67e8f9,
+      emissiveIntensity: 0.72,
+      metalness: 0.16,
+      roughness: 0.28,
+    });
+    const effectorShellMat = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      metalness: 0.22,
+      roughness: 0.36,
+    });
+    const effectorPlate = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.16, 1.1), effectorShellMat);
+    effectorPlate.position.y = 0.24;
+    zEffector.add(effectorPlate);
+
+    const effectorBody = new THREE.Mesh(new THREE.SphereGeometry(0.28, 24, 24), effectorBodyMat);
+    zEffector.add(effectorBody);
+
+    const effectorRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.48, 0.045, 12, 36),
+      new THREE.MeshBasicMaterial({
+        color: 0x22d3ee,
+        transparent: true,
+        opacity: 0.68,
+      }),
+    );
+    effectorRing.rotation.x = Math.PI / 2;
+    zEffector.add(effectorRing);
+
+    const downLink = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.8, 18), effectorShellMat);
+    downLink.position.y = -0.9;
+    zEffector.add(downLink);
+
+    const scanConeMat = new THREE.MeshBasicMaterial({
+      color: 0x67e8f9,
+      transparent: true,
+      opacity: 0.14,
+      side: THREE.DoubleSide,
+    });
+    const scanCone = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.8, 32, 1, true), scanConeMat);
+    scanCone.rotation.z = Math.PI;
+    scanCone.position.set(0, -2.15, 0);
     scanCone.visible = false;
     zEffector.add(scanCone);
 
-    twinRef.current = { xCarriage, yCarriage, zEffector, scanCone, plantMeshes, getPlantMat };
+    const twinObjects: TwinObjects = {
+      xCarriage,
+      yCarriage,
+      zEffector,
+      scanCone,
+      motionBounds: null,
+    };
+    twinRef.current = twinObjects;
 
     let reqId = 0;
+    let disposed = false;
+    let modelReady = false;
+    let framedObject: THREE.Object3D | null = null;
+    const loader = new GLTFLoader();
+    loader.load(
+      DIRECTORY_MODEL_URL,
+      (gltf) => {
+        if (disposed) {
+          return;
+        }
+
+        const layout = gltf.scene;
+        layout.rotation.y = Math.PI * 0.75;
+
+        layout.traverse((child) => {
+          if (!(child instanceof THREE.Mesh)) {
+            return;
+          }
+
+          child.castShadow = true;
+          child.receiveShadow = true;
+
+          if (!child.geometry.getAttribute('normal')) {
+            child.geometry.computeVertexNormals();
+          }
+
+          if (Array.isArray(child.material)) {
+            child.material.forEach((material) => {
+              if (material instanceof THREE.MeshStandardMaterial) {
+                material.metalness = Math.min(material.metalness, 0.12);
+                material.roughness = Math.max(material.roughness, 0.68);
+              }
+            });
+            return;
+          }
+
+          if (child.material instanceof THREE.MeshStandardMaterial) {
+            child.material.metalness = Math.min(child.material.metalness, 0.12);
+            child.material.roughness = Math.max(child.material.roughness, 0.68);
+          }
+        });
+
+        if (modelNeedsDisplayColor(layout)) {
+          applyDirectoryDisplayColors(layout);
+        }
+
+        modelPivot.add(layout);
+        const normalizedBounds = normalizeModel(layout, 18);
+        const topGuideY = normalizedBounds.max.y + 2.6;
+        const workHeight = normalizedBounds.max.y + 0.75;
+        const motionBounds: MotionBounds = {
+          minX: normalizedBounds.min.x + 1.4,
+          maxX: normalizedBounds.max.x - 1.4,
+          minDepth: normalizedBounds.min.z + 1.1,
+          maxDepth: normalizedBounds.max.z - 1.1,
+          minHeight: workHeight - topGuideY,
+          maxHeight: 0,
+        };
+
+        xCarriage.position.y = topGuideY;
+        twinObjects.motionBounds = motionBounds;
+
+        const xRailMat = new THREE.LineBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.35,
+        });
+        const yRailMat = new THREE.LineBasicMaterial({
+          color: 0x22d3ee,
+          transparent: true,
+          opacity: 0.32,
+        });
+
+        const xRail = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(motionBounds.minX, topGuideY, 0),
+            new THREE.Vector3(motionBounds.maxX, topGuideY, 0),
+          ]),
+          xRailMat,
+        );
+        modelPivot.add(xRail);
+
+        const yRail = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, motionBounds.minDepth),
+            new THREE.Vector3(0, 0, motionBounds.maxDepth),
+          ]),
+          yRailMat,
+        );
+        xCarriage.add(yRail);
+
+        xCarriage.position.x = mapRange(motionTargetRef.current.x, 0, AXIS_LIMITS.x, motionBounds.minX, motionBounds.maxX);
+        yCarriage.position.z = mapRange(
+          motionTargetRef.current.y,
+          0,
+          AXIS_LIMITS.y,
+          motionBounds.minDepth,
+          motionBounds.maxDepth,
+        );
+        zEffector.position.y = mapRange(
+          motionTargetRef.current.z,
+          0,
+          AXIS_LIMITS.z,
+          motionBounds.maxHeight,
+          motionBounds.minHeight,
+        );
+
+        framedObject = layout;
+        fitCameraToObject(camera, layout, width / height, controls);
+        modelReady = true;
+      },
+      undefined,
+      (error) => {
+        console.error('Failed to load directory layout model.', error);
+      },
+    );
 
     const animate = () => {
       reqId = window.requestAnimationFrame(animate);
+      const elapsed = performance.now() * 0.001;
+      haloMat.opacity = 0.11 + Math.sin(elapsed * 1.4) * 0.02;
+      scanConeMat.opacity = scanCone.visible ? 0.2 + Math.sin(elapsed * 6) * 0.05 : 0.14;
+      effectorBodyMat.emissiveIntensity = scanCone.visible ? 0.95 : 0.72;
+      effectorRing.scale.setScalar(scanCone.visible ? 1 + Math.sin(elapsed * 6) * 0.03 : 1);
 
-      xCarriage.position.x += (motionTargetRef.current.x - xCarriage.position.x) * 0.05;
-      yCarriage.position.y += (motionTargetRef.current.y - yCarriage.position.y) * 0.05;
-      zEffector.position.z += (motionTargetRef.current.z - zEffector.position.z) * 0.08;
+      if (modelReady && twinObjects.motionBounds) {
+        const targetX = mapRange(
+          motionTargetRef.current.x,
+          0,
+          AXIS_LIMITS.x,
+          twinObjects.motionBounds.minX,
+          twinObjects.motionBounds.maxX,
+        );
+        const targetDepth = mapRange(
+          motionTargetRef.current.y,
+          0,
+          AXIS_LIMITS.y,
+          twinObjects.motionBounds.minDepth,
+          twinObjects.motionBounds.maxDepth,
+        );
+        const targetHeight = mapRange(
+          motionTargetRef.current.z,
+          0,
+          AXIS_LIMITS.z,
+          twinObjects.motionBounds.maxHeight,
+          twinObjects.motionBounds.minHeight,
+        );
 
+        xCarriage.position.x += (targetX - xCarriage.position.x) * 0.08;
+        yCarriage.position.z += (targetDepth - yCarriage.position.z) * 0.08;
+        zEffector.position.y += (targetHeight - zEffector.position.y) * 0.12;
+      }
+
+      controls.update();
       renderer.render(scene, camera);
     };
     animate();
@@ -569,6 +813,10 @@ const App = () => {
       width = mount.clientWidth;
       height = mount.clientHeight;
       renderer.setSize(width, height);
+      if (modelReady && framedObject) {
+        fitCameraToObject(camera, framedObject, width / height, controls);
+        return;
+      }
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
     };
@@ -577,14 +825,16 @@ const App = () => {
     return () => {
       window.removeEventListener('resize', handleResize);
       window.cancelAnimationFrame(reqId);
+      disposed = true;
       twinRef.current = null;
+      controls.dispose();
 
       if (mount.contains(renderer.domElement)) {
         mount.removeChild(renderer.domElement);
       }
 
       scene.traverse((object: THREE.Object3D) => {
-        if (object instanceof THREE.Mesh) {
+        if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
           object.geometry.dispose();
           disposeMaterial(object.material);
         }
@@ -595,29 +845,8 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    motionTargetRef.current = {
-      x: armPos.x * 3 + 1.5,
-      y: armPos.y * 2.5 + 2.1,
-      z: armPos.z === 1 ? -1 : 0,
-    };
+    motionTargetRef.current = armPos;
   }, [armPos]);
-
-  useEffect(() => {
-    const twin = twinRef.current;
-    if (!twin) {
-      return;
-    }
-
-    rackState.forEach((slot) => {
-      const mesh = twin.plantMeshes[slot.id];
-      if (!mesh) {
-        return;
-      }
-
-      mesh.material = twin.getPlantMat(slot.status);
-      mesh.scale.y = slot.status === 1 ? 0.5 : slot.status === 0 ? 0.01 : 1;
-    });
-  }, [rackState]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -635,8 +864,32 @@ const App = () => {
     console.log(`[Python Interface] Executing: ${cmd}`, payload);
   };
 
+  const setManualAxis = (axis: keyof ArmPosition, value: number) => {
+    if (systemMode === 'SCANNING') {
+      return;
+    }
+
+    const axisMax = AXIS_LIMITS[axis];
+    const nextValue = clamp(value, 0, axisMax);
+
+    setSystemMode('MANUAL');
+    setArmPos((prev) => ({ ...prev, [axis]: nextValue }));
+  };
+
+  const handleResumeAuto = () => {
+    if (systemMode === 'SCANNING') {
+      return;
+    }
+
+    setSystemMode('AUTO');
+    addLog('已恢复自动待机，保留当前位姿。', 'info');
+    /*
+    addLog('宸叉仮澶嶈嚜鍔ㄥ緟鏈猴紝褰撳墠浣嶇疆宸蹭繚鐣欍€?, 'info');
+    */
+  };
+
   const handleSmartPick = async () => {
-    if (systemMode !== 'AUTO') {
+    if (systemMode === 'SCANNING') {
       return;
     }
 
@@ -715,6 +968,7 @@ const App = () => {
   };
 
   const handleReset = () => {
+    setSystemMode('AUTO');
     setArmPos({ x: 0, y: 0, z: 0 });
     addLog('伺服电机回零 (Home)。', 'info');
     sendCmdToPython('HOME', {});
@@ -808,9 +1062,75 @@ const App = () => {
                 </div>
                 <div className="rounded border border-slate-800 bg-slate-950 p-2">
                   <span className="block text-[10px] text-slate-500">Z-Axis</span>
-                  <span className={armPos.z === 1 ? 'text-green-400' : 'text-slate-400'}>
-                    {armPos.z === 1 ? 'EXT' : 'RET'}
+                  <span className={zExtended ? 'text-green-400' : 'text-slate-400'}>
+                    {(armPos.z * Z_TRAVEL_MM).toFixed(0)}
                   </span>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold tracking-[0.18em] text-slate-500">XYZ MANUAL</span>
+                  <button
+                    onClick={handleResumeAuto}
+                    disabled={systemMode === 'SCANNING'}
+                    className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/10 disabled:opacity-50"
+                  >
+                    AUTO
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                      <span>X 轴</span>
+                      <span className="font-mono text-cyan-300">{(armPos.x * 300).toFixed(0)} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={AXIS_LIMITS.x}
+                      step={0.01}
+                      value={armPos.x}
+                      onChange={(event) => setManualAxis('x', Number(event.target.value))}
+                      disabled={systemMode === 'SCANNING'}
+                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                      <span>Y 轴</span>
+                      <span className="font-mono text-cyan-300">{(armPos.y * 250).toFixed(0)} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={AXIS_LIMITS.y}
+                      step={0.01}
+                      value={armPos.y}
+                      onChange={(event) => setManualAxis('y', Number(event.target.value))}
+                      disabled={systemMode === 'SCANNING'}
+                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                      <span>Z 轴</span>
+                      <span className="font-mono text-cyan-300">{(armPos.z * Z_TRAVEL_MM).toFixed(0)} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={AXIS_LIMITS.z}
+                      step={1}
+                      value={armPos.z}
+                      onChange={(event) => setManualAxis('z', Number(event.target.value))}
+                      disabled={systemMode === 'SCANNING'}
+                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -841,7 +1161,7 @@ const App = () => {
           </div>
         </div>
 
-        <div ref={mountRef} className="absolute inset-0 cursor-crosshair"></div>
+        <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing"></div>
 
         <div className="absolute right-6 top-6 z-10 w-[27rem] max-w-[calc(100%-3rem)]">
           <div className="rounded-2xl border border-slate-700/50 bg-slate-900/82 p-5 shadow-2xl backdrop-blur-md">
