@@ -38,3 +38,9 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Local generated assets / docs
+.pptx_deps/
+downloads/
+assets/ppt/.cache/
+docs/~$*.pptx

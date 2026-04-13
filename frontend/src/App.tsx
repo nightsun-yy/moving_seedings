@@ -15,6 +15,10 @@ import * as THREE from 'three';
 type SystemMode = 'AUTO' | 'MANUAL' | 'SCANNING';
 type LogType = 'info' | 'success' | 'error';
 type RackStatus = 0 | 1 | 2 | 3;
+type DeviceState = 'online' | 'standby' | 'active' | 'offline';
+type LinkState = 'online' | 'active' | 'alert';
+type Tone = 'online' | 'active' | 'alert';
+type NodeId = 'ipc' | 'plc' | 'xAxis' | 'yAxis' | 'zAxis' | 'camera';
 
 type SysLogEntry = {
   time: string;
@@ -52,10 +56,53 @@ type TwinObjects = {
   getPlantMat: (status: RackStatus) => THREE.MeshStandardMaterial;
 };
 
+type TopologyNode = {
+  id: NodeId;
+  label: string;
+  short: string;
+  role: string;
+  x: number;
+  y: number;
+  status: DeviceState;
+};
+
+type TopologyLink = {
+  id: string;
+  from: NodeId;
+  to: NodeId;
+  label: string;
+  detail: string;
+  status: LinkState;
+};
+
+type EnvDataProps = {
+  icon: ReactNode;
+  val: string;
+};
+
+type MetricCardProps = {
+  label: string;
+  value: string;
+  tone: Tone;
+};
+
+type StatusPillProps = {
+  label: string;
+  tone: Tone;
+};
+
+type TopologyNodeCardProps = {
+  node: TopologyNode;
+};
+
+type LinkStatusRowProps = {
+  link: TopologyLink;
+};
+
 const INITIAL_LOGS: SysLogEntry[] = [
   {
     time: new Date().toLocaleTimeString(),
-    msg: '系统初始化完成，3D引擎加载成功。',
+    msg: '系统初始化完成，3D 引擎与 PLC 通讯链路已就绪。',
     type: 'info',
   },
 ];
@@ -73,6 +120,74 @@ const INITIAL_RACK_STATE: RackSlot[] = [
 ];
 
 const INITIAL_TARGET = { x: 1.5, y: 2.1, z: 0 };
+
+const STATUS_PILL_STYLES: Record<Tone, string> = {
+  online: 'border-cyan-500/30 bg-cyan-500/12 text-cyan-200',
+  active: 'border-emerald-500/30 bg-emerald-500/12 text-emerald-200',
+  alert: 'border-amber-500/30 bg-amber-500/12 text-amber-200',
+};
+
+const METRIC_STYLES: Record<Tone, string> = {
+  online: 'border-cyan-500/25 bg-cyan-500/10 text-cyan-200',
+  active: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200',
+  alert: 'border-amber-500/25 bg-amber-500/10 text-amber-200',
+};
+
+const NODE_STATUS_META: Record<
+  DeviceState,
+  { label: string; border: string; dot: string; text: string }
+> = {
+  online: {
+    label: '在线',
+    border: 'border-cyan-500/30 bg-cyan-500/10',
+    dot: 'bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.8)]',
+    text: 'text-cyan-200',
+  },
+  standby: {
+    label: '待机',
+    border: 'border-slate-600/70 bg-slate-800/90',
+    dot: 'bg-slate-400 shadow-[0_0_12px_rgba(148,163,184,0.45)]',
+    text: 'text-slate-200',
+  },
+  active: {
+    label: '活跃',
+    border: 'border-emerald-500/35 bg-emerald-500/12',
+    dot: 'bg-emerald-400 shadow-[0_0_14px_rgba(74,222,128,0.9)]',
+    text: 'text-emerald-200',
+  },
+  offline: {
+    label: '离线',
+    border: 'border-red-500/30 bg-red-500/12',
+    dot: 'bg-red-400 shadow-[0_0_12px_rgba(248,113,113,0.75)]',
+    text: 'text-red-200',
+  },
+};
+
+const LINK_STATUS_META: Record<
+  LinkState,
+  { label: string; badge: string; stroke: string; dot: string; dashArray?: string }
+> = {
+  online: {
+    label: '在线',
+    badge: 'border-cyan-500/25 bg-cyan-500/10 text-cyan-200',
+    stroke: '#38bdf8',
+    dot: 'bg-cyan-400',
+  },
+  active: {
+    label: '活跃',
+    badge: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200',
+    stroke: '#22c55e',
+    dot: 'bg-emerald-400',
+    dashArray: '5 4',
+  },
+  alert: {
+    label: '告警',
+    badge: 'border-amber-500/25 bg-amber-500/10 text-amber-200',
+    stroke: '#f59e0b',
+    dot: 'bg-amber-400',
+    dashArray: '6 4',
+  },
+};
 
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
@@ -98,8 +213,127 @@ const App = () => {
   const motionTargetRef = useRef(INITIAL_TARGET);
 
   const addLog = (msg: string, type: LogType = 'info') => {
-    setSysLog((prev) => [{ time: new Date().toLocaleTimeString(), msg, type }, ...prev].slice(0, 5));
+    setSysLog((prev) => [{ time: new Date().toLocaleTimeString(), msg, type }, ...prev].slice(0, 6));
   };
+
+  const plcOnline = isConnected;
+  const axisBusOnline = plcOnline;
+  const cameraBusOnline = plcOnline;
+
+  const topologyNodes: TopologyNode[] = [
+    {
+      id: 'ipc',
+      label: '工控机 IPC',
+      short: 'IPC',
+      role: '上位机 / HMI',
+      x: 14,
+      y: 18,
+      status: plcOnline ? 'online' : 'offline',
+    },
+    {
+      id: 'plc',
+      label: 'PLC 控制器',
+      short: 'PLC',
+      role: '运动控制主站',
+      x: 44,
+      y: 40,
+      status: plcOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'offline',
+    },
+    {
+      id: 'xAxis',
+      label: 'X 轴伺服',
+      short: 'X',
+      role: `${(armPos.x * 300).toFixed(0)} mm`,
+      x: 82,
+      y: 16,
+      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.x > 0 ? 'active' : 'standby') : 'offline',
+    },
+    {
+      id: 'yAxis',
+      label: 'Y 轴伺服',
+      short: 'Y',
+      role: `${(armPos.y * 250).toFixed(0)} mm`,
+      x: 84,
+      y: 42,
+      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.y > 0 ? 'active' : 'standby') : 'offline',
+    },
+    {
+      id: 'zAxis',
+      label: 'Z 轴执行端',
+      short: 'Z',
+      role: armPos.z === 1 ? '伸出取苗' : '原点待机',
+      x: 80,
+      y: 72,
+      status: axisBusOnline ? (armPos.z === 1 ? 'active' : 'standby') : 'offline',
+    },
+    {
+      id: 'camera',
+      label: '视觉相机',
+      short: 'CAM',
+      role: systemMode === 'SCANNING' ? '图像采集中' : '待触发',
+      x: 18,
+      y: 74,
+      status: cameraBusOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'offline',
+    },
+  ];
+
+  const topologyLinks: TopologyLink[] = [
+    {
+      id: 'ipc-plc',
+      from: 'ipc',
+      to: 'plc',
+      label: '电脑 <-> PLC',
+      detail: plcOnline ? '工业以太网已建立，HMI 通讯稳定。' : '上位机与 PLC 链路中断。',
+      status: plcOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'alert',
+    },
+    {
+      id: 'plc-x',
+      from: 'plc',
+      to: 'xAxis',
+      label: 'PLC <-> X 轴',
+      detail: axisBusOnline
+        ? `伺服在线，当前位置 ${(armPos.x * 300).toFixed(0)} mm。`
+        : 'X 轴伺服离线。',
+      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.x > 0 ? 'active' : 'online') : 'alert',
+    },
+    {
+      id: 'plc-y',
+      from: 'plc',
+      to: 'yAxis',
+      label: 'PLC <-> Y 轴',
+      detail: axisBusOnline
+        ? `伺服在线，当前位置 ${(armPos.y * 250).toFixed(0)} mm。`
+        : 'Y 轴伺服离线。',
+      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.y > 0 ? 'active' : 'online') : 'alert',
+    },
+    {
+      id: 'plc-z',
+      from: 'plc',
+      to: 'zAxis',
+      label: 'PLC <-> Z 轴',
+      detail: axisBusOnline ? (armPos.z === 1 ? '抓取执行中，伸缩机构已动作。' : 'Z 轴回零待机。') : 'Z 轴执行端离线。',
+      status: axisBusOnline ? (armPos.z === 1 ? 'active' : 'online') : 'alert',
+    },
+    {
+      id: 'plc-camera',
+      from: 'plc',
+      to: 'camera',
+      label: 'PLC <-> 视觉相机',
+      detail: cameraBusOnline ? (systemMode === 'SCANNING' ? '触发采集中，图像回传正常。' : '触发链路待机。') : '视觉触发链路异常。',
+      status: cameraBusOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'alert',
+    },
+  ];
+
+  const topologyHealthTone: Tone =
+    topologyLinks.some((link) => link.status === 'alert')
+      ? 'alert'
+      : topologyLinks.some((link) => link.status === 'active')
+        ? 'active'
+        : 'online';
+
+  const onlineLinkCount = topologyLinks.filter((link) => link.status !== 'alert').length;
+  const activeLinkCount = topologyLinks.filter((link) => link.status === 'active').length;
+  const alertLinkCount = topologyLinks.filter((link) => link.status === 'alert').length;
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -407,7 +641,7 @@ const App = () => {
     }
 
     setSystemMode('SCANNING');
-    addLog('开始 AI 智能寻苗巡检...', 'info');
+    addLog('开始 AI 智能巡检，进入视觉扫描流程。', 'info');
 
     const path: Array<Pick<ArmPosition, 'x' | 'y'>> = [
       { x: 0, y: 2 },
@@ -454,7 +688,7 @@ const App = () => {
         sendCmdToPython('MOVE_Z', { action: 'RETRACT' });
         await sleep(800);
 
-        addLog('正在搬运至一楼出库口...', 'info');
+        addLog('正在搬运至一楼出库口。', 'info');
         setArmPos({ x: 0, y: 0, z: 0 });
         sendCmdToPython('MOVE_XY', { x: 0, y: 0 });
         await sleep(1500);
@@ -469,7 +703,7 @@ const App = () => {
       }
 
       if (currentSlot.status === 3) {
-        addLog(`警告: [${currentSlot.id}] 发现异常病苗/缺水！`, 'error');
+        addLog(`告警: [${currentSlot.id}] 发现异常病苗或缺水状态。`, 'error');
       }
     }
 
@@ -482,93 +716,98 @@ const App = () => {
 
   const handleReset = () => {
     setArmPos({ x: 0, y: 0, z: 0 });
-    addLog('伺服电机归零 (Home)。', 'info');
+    addLog('伺服电机回零 (Home)。', 'info');
     sendCmdToPython('HOME', {});
   };
 
+  const nodeLookup = {} as Record<NodeId, TopologyNode>;
+  for (const node of topologyNodes) {
+    nodeLookup[node.id] = node;
+  }
+
   return (
-    <div className="w-full h-screen bg-slate-950 text-slate-200 font-sans flex flex-col overflow-hidden">
-      <header className="h-16 bg-slate-900/80 backdrop-blur border-b border-slate-800 flex items-center justify-between px-6 shrink-0 relative z-10">
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-950 text-slate-200">
+      <header className="relative z-10 flex h-16 shrink-0 items-center justify-between border-b border-slate-800 bg-slate-900/80 px-6 backdrop-blur">
         <div className="flex items-center gap-3">
-          <div className="bg-blue-600/20 p-2 rounded-lg border border-blue-500/30">
-            <ShieldCheck className="text-blue-400 w-6 h-6" />
+          <div className="rounded-lg border border-blue-500/30 bg-blue-600/20 p-2">
+            <ShieldCheck className="h-6 w-6 text-blue-400" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-wider text-white">智慧农业 3D数字孪生控制台</h1>
-            <p className="text-xs text-slate-400 font-mono">ID: JSG2026-AGRI-01 | Python 网关在线</p>
+            <h1 className="text-lg font-bold tracking-wider text-white">智慧农业 3D 数字孪生控制台</h1>
+            <p className="font-mono text-xs text-slate-400">ID: JSG2026-AGRI-01 | Python 网关在线</p>
           </div>
         </div>
 
         <div className="flex items-center gap-8">
           <div className="flex gap-4">
-            <EnvData icon={<Thermometer className="text-orange-500 w-4 h-4" />} val={`${envData.temp.toFixed(1)}°C`} />
-            <EnvData icon={<Droplets className="text-blue-500 w-4 h-4" />} val={`${envData.humidity.toFixed(1)}%`} />
-            <EnvData icon={<Sun className="text-yellow-500 w-4 h-4" />} val={`${Math.round(envData.light)} Lx`} />
+            <EnvData icon={<Thermometer className="h-4 w-4 text-orange-500" />} val={`${envData.temp.toFixed(1)}°C`} />
+            <EnvData icon={<Droplets className="h-4 w-4 text-blue-500" />} val={`${envData.humidity.toFixed(1)}%`} />
+            <EnvData icon={<Sun className="h-4 w-4 text-yellow-500" />} val={`${Math.round(envData.light)} Lx`} />
           </div>
           <div className="h-8 w-px bg-slate-700"></div>
           <div className="flex items-center gap-2">
             <span className="relative flex h-3 w-3">
-              {isConnected && (
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+              {plcOnline && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
               )}
               <span
-                className={`relative inline-flex rounded-full h-3 w-3 ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}
+                className={`relative inline-flex h-3 w-3 rounded-full ${plcOnline ? 'bg-green-500' : 'bg-red-500'}`}
               ></span>
             </span>
-            <span className="text-sm font-bold text-slate-300">PLC Link</span>
+            <span className="text-sm font-bold text-slate-300">工控网络</span>
           </div>
         </div>
       </header>
 
-      <div className="flex-1 relative flex">
-        <div className="absolute left-6 top-6 bottom-6 w-80 flex flex-col gap-4 z-10">
-          <div className="bg-slate-900/80 backdrop-blur-md rounded-xl border border-slate-700/50 p-5 shadow-2xl">
-            <h2 className="text-sm font-bold text-slate-400 mb-4 flex items-center gap-2">
-              <Activity className="w-4 h-4" /> 制造执行系统 (MES)
+      <div className="relative flex min-h-0 flex-1">
+        <div className="absolute bottom-6 left-6 top-6 z-10 flex w-80 max-w-[calc(100%-3rem)] flex-col gap-4">
+          <div className="rounded-xl border border-slate-700/50 bg-slate-900/80 p-5 shadow-2xl backdrop-blur-md">
+            <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-400">
+              <Activity className="h-4 w-4" /> 制造执行系统 (MES)
             </h2>
 
             <div className="space-y-3">
               <button
                 onClick={handleSmartPick}
                 disabled={systemMode === 'SCANNING'}
-                className="w-full relative group overflow-hidden bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white py-3 rounded-lg text-sm font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                className="flex w-full items-center justify-center gap-2 overflow-hidden rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 py-3 text-sm font-bold text-white shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50"
               >
                 {systemMode === 'SCANNING' ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <RefreshCw className="h-4 w-4 animate-spin" />
                 ) : (
-                  <Search className="w-4 h-4" />
+                  <Search className="h-4 w-4" />
                 )}
-                {systemMode === 'SCANNING' ? 'AI 视觉巡检中...' : '一键 AI 寻苗与出库'}
+                {systemMode === 'SCANNING' ? 'AI 视觉巡检中...' : '一键 AI 巡检与出库'}
               </button>
 
               <div className="flex gap-2">
                 <button
                   onClick={handleReset}
-                  className="flex-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-700"
                 >
-                  <RefreshCw className="w-4 h-4" /> 原点复位
+                  <RefreshCw className="h-4 w-4" /> 原点复位
                 </button>
-                <button className="flex-1 bg-red-900/30 hover:bg-red-900/50 border border-red-800/50 text-red-400 py-2 rounded-lg text-sm transition-colors flex items-center justify-center gap-2">
-                  <Power className="w-4 h-4" /> 硬件急停
+                <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-800/50 bg-red-900/30 py-2 text-sm text-red-400 transition-colors hover:bg-red-900/50">
+                  <Power className="h-4 w-4" /> 硬件急停
                 </button>
               </div>
             </div>
 
-            <div className="mt-4 pt-4 border-t border-slate-700/50">
-              <div className="flex justify-between text-xs text-slate-400 mb-2">
+            <div className="mt-4 border-t border-slate-700/50 pt-4">
+              <div className="mb-2 flex justify-between text-xs text-slate-400">
                 <span>三轴伺服坐标反馈 (mm)</span>
               </div>
-              <div className="grid grid-cols-3 gap-2 font-mono text-center">
-                <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                  <span className="text-[10px] block text-slate-500">X-Axis</span>
+              <div className="grid grid-cols-3 gap-2 text-center font-mono">
+                <div className="rounded border border-slate-800 bg-slate-950 p-2">
+                  <span className="block text-[10px] text-slate-500">X-Axis</span>
                   <span className="text-blue-400">{(armPos.x * 300).toFixed(0)}</span>
                 </div>
-                <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                  <span className="text-[10px] block text-slate-500">Y-Axis</span>
+                <div className="rounded border border-slate-800 bg-slate-950 p-2">
+                  <span className="block text-[10px] text-slate-500">Y-Axis</span>
                   <span className="text-blue-400">{(armPos.y * 250).toFixed(0)}</span>
                 </div>
-                <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                  <span className="text-[10px] block text-slate-500">Z-Axis</span>
+                <div className="rounded border border-slate-800 bg-slate-950 p-2">
+                  <span className="block text-[10px] text-slate-500">Z-Axis</span>
                   <span className={armPos.z === 1 ? 'text-green-400' : 'text-slate-400'}>
                     {armPos.z === 1 ? 'EXT' : 'RET'}
                   </span>
@@ -577,13 +816,13 @@ const App = () => {
             </div>
           </div>
 
-          <div className="bg-slate-900/80 backdrop-blur-md rounded-xl border border-slate-700/50 p-5 shadow-2xl flex-1 flex flex-col">
-            <h2 className="text-sm font-bold text-slate-400 mb-4 flex items-center gap-2">
-              <Camera className="w-4 h-4" /> 边缘节点运行日志
+          <div className="flex flex-1 flex-col rounded-xl border border-slate-700/50 bg-slate-900/80 p-5 shadow-2xl backdrop-blur-md">
+            <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-400">
+              <Camera className="h-4 w-4" /> 边缘节点运行日志
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-mono text-xs pr-2 custom-scrollbar">
-              {sysLog.map((log, i) => (
-                <div key={i} className="flex flex-col gap-1 border-b border-slate-800/50 pb-2">
+            <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto pr-2 font-mono text-xs">
+              {sysLog.map((log, index) => (
+                <div key={index} className="flex flex-col gap-1 border-b border-slate-800/50 pb-2">
                   <span className="text-slate-500">[{log.time}]</span>
                   <span
                     className={
@@ -604,23 +843,87 @@ const App = () => {
 
         <div ref={mountRef} className="absolute inset-0 cursor-crosshair"></div>
 
-        <div className="absolute right-6 bottom-6 bg-slate-900/60 backdrop-blur-md rounded-xl border border-slate-800 p-4 shadow-xl z-10 pointer-events-none">
-          <h3 className="text-xs font-bold text-slate-500 mb-3 uppercase">AI 识别状态图例</h3>
+        <div className="absolute right-6 top-6 z-10 w-[27rem] max-w-[calc(100%-3rem)]">
+          <div className="rounded-2xl border border-slate-700/50 bg-slate-900/82 p-5 shadow-2xl backdrop-blur-md">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-bold text-slate-200">组态网络 / 通讯拓扑</h2>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  展示工控机、PLC、XYZ 三轴与视觉节点的实时连接状态。
+                </p>
+              </div>
+              <StatusPill
+                tone={topologyHealthTone}
+                label={topologyHealthTone === 'alert' ? '存在告警' : topologyHealthTone === 'active' ? '通讯活跃' : '链路正常'}
+              />
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              <MetricCard label="在线链路" value={`${onlineLinkCount}/${topologyLinks.length}`} tone="online" />
+              <MetricCard label="活跃链路" value={`${activeLinkCount}`} tone="active" />
+              <MetricCard label="异常链路" value={`${alertLinkCount}`} tone="alert" />
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-800 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_rgba(2,6,23,0.15)_38%,_rgba(2,6,23,0.92)_90%)] p-4">
+              <div className="relative h-[18rem] overflow-hidden rounded-xl border border-slate-800/80 bg-slate-950/75">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
+                  {topologyLinks.map((link) => {
+                    const fromNode = nodeLookup[link.from];
+                    const toNode = nodeLookup[link.to];
+                    const meta = LINK_STATUS_META[link.status];
+                    const midX = (fromNode.x + toNode.x) / 2;
+                    const midY = (fromNode.y + toNode.y) / 2;
+
+                    return (
+                      <g key={link.id}>
+                        <line
+                          x1={fromNode.x}
+                          y1={fromNode.y}
+                          x2={toNode.x}
+                          y2={toNode.y}
+                          stroke={meta.stroke}
+                          strokeWidth={2.1}
+                          strokeOpacity={0.9}
+                          strokeDasharray={meta.dashArray}
+                          className={link.status === 'active' ? 'topology-line-active' : undefined}
+                        />
+                        <circle cx={midX} cy={midY} r={1.2} fill={meta.stroke} className={link.status === 'active' ? 'topology-pulse' : undefined} />
+                      </g>
+                    );
+                  })}
+                </svg>
+
+                {topologyNodes.map((node) => (
+                  <TopologyNodeCard key={node.id} node={node} />
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {topologyLinks.map((link) => (
+                <LinkStatusRow key={link.id} link={link} />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="pointer-events-none absolute bottom-6 right-6 z-10 rounded-xl border border-slate-800 bg-slate-900/60 p-4 shadow-xl backdrop-blur-md">
+          <h3 className="mb-3 text-xs font-bold uppercase text-slate-500">AI 识别状态图例</h3>
           <div className="space-y-2 text-sm">
             <div className="flex items-center gap-2">
-              <div className="w-3 h-3 bg-green-500 rounded-sm shadow-[0_0_8px_#22c55e]"></div>
+              <div className="h-3 w-3 rounded-sm bg-green-500 shadow-[0_0_8px_#22c55e]"></div>
               <span className="text-slate-300">成熟期 (可采摘)</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-3 h-3 bg-yellow-500 rounded-sm shadow-[0_0_8px_#eab308]"></div>
+              <div className="h-3 w-3 rounded-sm bg-yellow-500 shadow-[0_0_8px_#eab308]"></div>
               <span className="text-slate-300">生长中期</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-3 h-3 bg-red-500 rounded-sm shadow-[0_0_8px_#ef4444]"></div>
-              <span className="text-slate-300">缺水/病害预警</span>
+              <div className="h-3 w-3 rounded-sm bg-red-500 shadow-[0_0_8px_#ef4444]"></div>
+              <span className="text-slate-300">缺水 / 病害预警</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-3 h-3 bg-slate-700 rounded-sm"></div>
+              <div className="h-3 w-3 rounded-sm bg-slate-700"></div>
               <span className="text-slate-500">仓位空置</span>
             </div>
           </div>
@@ -633,6 +936,47 @@ const App = () => {
             .custom-scrollbar::-webkit-scrollbar { width: 4px; }
             .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
             .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+            .topology-line-active {
+              animation: topologyDash 2.2s linear infinite;
+            }
+
+            .topology-pulse {
+              transform-origin: center;
+              animation: topologyPulse 1.4s ease-in-out infinite;
+            }
+
+            .topology-beacon {
+              animation: topologyBeacon 1.6s ease-in-out infinite;
+            }
+
+            @keyframes topologyDash {
+              to {
+                stroke-dashoffset: -18;
+              }
+            }
+
+            @keyframes topologyPulse {
+              0%, 100% {
+                opacity: 0.35;
+                transform: scale(1);
+              }
+              50% {
+                opacity: 1;
+                transform: scale(1.8);
+              }
+            }
+
+            @keyframes topologyBeacon {
+              0%, 100% {
+                transform: scale(1);
+                opacity: 0.9;
+              }
+              50% {
+                transform: scale(1.28);
+                opacity: 1;
+              }
+            }
           `,
         }}
       />
@@ -640,16 +984,62 @@ const App = () => {
   );
 };
 
-type EnvDataProps = {
-  icon: ReactNode;
-  val: string;
-};
-
 const EnvData = ({ icon, val }: EnvDataProps) => (
-  <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800">
+  <div className="flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5">
     {icon}
-    <span className="text-sm font-mono text-slate-300">{val}</span>
+    <span className="font-mono text-sm text-slate-300">{val}</span>
   </div>
 );
+
+const MetricCard = ({ label, value, tone }: MetricCardProps) => (
+  <div className={`rounded-xl border px-3 py-3 ${METRIC_STYLES[tone]}`}>
+    <div className="text-[11px] text-slate-400">{label}</div>
+    <div className="mt-1 text-lg font-semibold">{value}</div>
+  </div>
+);
+
+const StatusPill = ({ label, tone }: StatusPillProps) => (
+  <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${STATUS_PILL_STYLES[tone]}`}>
+    {label}
+  </div>
+);
+
+const TopologyNodeCard = ({ node }: TopologyNodeCardProps) => {
+  const meta = NODE_STATUS_META[node.status];
+
+  return (
+    <div
+      className="absolute w-[6.75rem] -translate-x-1/2 -translate-y-1/2"
+      style={{ left: `${node.x}%`, top: `${node.y}%` }}
+    >
+      <div className={`rounded-2xl border p-3 shadow-lg backdrop-blur-sm ${meta.border}`}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold tracking-[0.24em] text-slate-500">{node.short}</span>
+          <span className={`h-2.5 w-2.5 rounded-full ${meta.dot} ${node.status === 'active' ? 'topology-beacon' : ''}`}></span>
+        </div>
+        <div className="mt-2 text-sm font-semibold text-white">{node.label}</div>
+        <div className="mt-1 min-h-[2rem] text-[11px] leading-4 text-slate-400">{node.role}</div>
+        <div className={`mt-3 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${meta.text}`}>
+          {meta.label}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const LinkStatusRow = ({ link }: LinkStatusRowProps) => {
+  const meta = LINK_STATUS_META[link.status];
+
+  return (
+    <div className="grid grid-cols-[auto,1fr,auto] items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/65 px-3 py-3">
+      <span className={`mt-1 h-2.5 w-2.5 rounded-full ${meta.dot}`}></span>
+      <div>
+        <div className="text-sm font-medium text-slate-200">{link.label}</div>
+        <div className="mt-1 text-xs leading-5 text-slate-400">{link.detail}</div>
+      </div>
+      <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span>
+    </div>
+  );
+};
 
 export default App;
