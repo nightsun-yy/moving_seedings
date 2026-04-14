@@ -13,7 +13,6 @@ import {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import directoryModelUrl from '../../docs/0413.gltf?url';
 
 type SystemMode = 'AUTO' | 'MANUAL' | 'SCANNING';
 type LogType = 'info' | 'success' | 'error';
@@ -128,7 +127,7 @@ const INITIAL_RACK_STATE: RackSlot[] = [
   { id: 'C3', x: 2, y: 0, status: 0 },
 ];
 
-const DIRECTORY_MODEL_URL = directoryModelUrl;
+const DIRECTORY_MODEL_URL = '/models/master-layout.gltf';
 const AXIS_LIMITS = {
   x: 2,
   y: 2,

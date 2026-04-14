@@ -43,4 +43,5 @@ Thumbs.db
 .pptx_deps/
 downloads/
 assets/ppt/.cache/
+docs/PPT/.cache/
 docs/~$*.pptx
