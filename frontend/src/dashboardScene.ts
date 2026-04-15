@@ -1,29 +1,32 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { AXIS_RANGE, MODEL_FALLBACK_PALETTE, MODEL_URL, mapRange, type AxisPosition } from './dashboardData';
+import { AXIS_RANGE, WATER_STATION_COORDS, getTrayCoords, type AxisPosition, type LogLevel, type TrayId } from './dashboardData';
 
-export type MotionRig = {
-  root: THREE.Group;
-  xCarriage: THREE.Group;
-  yCarriage: THREE.Group;
-  zCarriage: THREE.Group;
-  cylinderRod: THREE.Mesh;
-  pulseRing: THREE.Mesh;
-  xRange: [number, number];
-  yRange: [number, number];
-  zRange: [number, number];
-  cylinderRange: [number, number];
+type SceneRef<T> = {
+  current: T;
 };
 
-type ModelState = 'loading' | 'ready' | 'error';
+type TrayPhysicalState = 'rack' | 'fork' | 'station';
+
+type TrayGroup = THREE.Group & {
+  userData: {
+    trayId: TrayId;
+    trayBase: THREE.Mesh;
+    physicalState: TrayPhysicalState;
+  };
+};
 
 type MountSceneOptions = {
   mount: HTMLDivElement;
-  axisRef: { current: AxisPosition };
-  cylinderRef: { current: boolean };
-  onModelState: (state: ModelState) => void;
+  axisRef: SceneRef<AxisPosition>;
+  cylinderRef: SceneRef<boolean>;
+  cameraOnlineRef: SceneRef<boolean>;
+  activeTrayRef: SceneRef<TrayId>;
+  onActiveTrayChange: (trayId: TrayId) => void;
+  onLog: (module: string, message: string, type?: LogLevel) => void;
 };
+
+const SCENE_AXIS_SCALE = 0.3;
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]) => {
   if (Array.isArray(material)) {
@@ -34,309 +37,348 @@ const disposeMaterial = (material: THREE.Material | THREE.Material[]) => {
   material.dispose();
 };
 
-const needsDisplayColor = (object: THREE.Object3D) => {
-  let materialCount = 0;
-  let grayscaleCount = 0;
-  const uniqueColors = new Set<string>();
-
-  object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) {
-      return;
-    }
-
-    const materials = Array.isArray(child.material) ? child.material : [child.material];
-    materials.forEach((material) => {
-      const candidate = material as THREE.Material & { color?: THREE.Color };
-      if (!candidate.color) {
-        return;
-      }
-
-      materialCount += 1;
-      uniqueColors.add(candidate.color.getHexString());
-      const maxChannel = Math.max(candidate.color.r, candidate.color.g, candidate.color.b);
-      const minChannel = Math.min(candidate.color.r, candidate.color.g, candidate.color.b);
-      if (maxChannel - minChannel < 0.08) {
-        grayscaleCount += 1;
-      }
-    });
-  });
-
-  return materialCount > 0 && uniqueColors.size <= 3 && grayscaleCount / materialCount > 0.7;
-};
-
-const colorizeMaterial = (material: THREE.Material, colorHex: number) => {
-  const color = new THREE.Color(colorHex);
-  const cloned = material.clone() as THREE.Material & {
-    color?: THREE.Color;
-    emissive?: THREE.Color;
-    metalness?: number;
-    roughness?: number;
-    emissiveIntensity?: number;
-  };
-
-  if (cloned.color) {
-    cloned.color.lerp(color, 0.78);
-  }
-
-  if (cloned.emissive) {
-    cloned.emissive.copy(color).multiplyScalar(0.04);
-    cloned.emissiveIntensity = 0.7;
-  }
-
-  if (typeof cloned.metalness === 'number') {
-    cloned.metalness = Math.min(cloned.metalness, 0.12);
-  }
-
-  if (typeof cloned.roughness === 'number') {
-    cloned.roughness = Math.max(cloned.roughness, 0.58);
-  }
-
-  return cloned;
-};
-
-const applyDisplayPalette = (object: THREE.Object3D) => {
-  let index = 0;
-
-  object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) {
-      return;
-    }
-
-    const color = MODEL_FALLBACK_PALETTE[index % MODEL_FALLBACK_PALETTE.length];
-    child.material = Array.isArray(child.material)
-      ? child.material.map((material) => colorizeMaterial(material, color))
-      : colorizeMaterial(child.material, color);
-    index += 1;
-  });
-};
-
-const normalizeModel = (object: THREE.Object3D, targetMaxSize: number) => {
-  const bounds = new THREE.Box3().setFromObject(object);
-  const size = bounds.getSize(new THREE.Vector3());
-  const maxDimension = Math.max(size.x, size.y, size.z, 1);
-  const scale = targetMaxSize / maxDimension;
-
-  object.scale.setScalar(scale);
-  object.position.set(
-    -((bounds.min.x + bounds.max.x) * scale) / 2,
-    -(bounds.min.y * scale),
-    -((bounds.min.z + bounds.max.z) * scale) / 2,
-  );
-
-  return new THREE.Box3().setFromObject(object);
-};
-
-const fitCamera = (camera: THREE.PerspectiveCamera, controls: OrbitControls, object: THREE.Object3D, aspect: number) => {
-  const bounds = new THREE.Box3().setFromObject(object);
-  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
-  const radius = Math.max(sphere.radius, 1);
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = (radius / Math.sin(fov / 2)) * 1.12;
-
-  camera.aspect = aspect;
-  camera.near = Math.max(0.1, distance / 80);
-  camera.far = distance * 16;
-  camera.position.set(sphere.center.x + distance * 0.9, sphere.center.y + radius * 0.65, sphere.center.z + distance * 0.95);
-  controls.target.copy(sphere.center);
-  controls.update();
-  camera.updateProjectionMatrix();
-};
-
-const buildMotionRig = (bounds: THREE.Box3): MotionRig => {
-  const size = bounds.getSize(new THREE.Vector3());
-  const trackSpan = Math.max(size.x * 0.88, 7.2);
-  const verticalDrop = Math.max(size.y * 0.78, 6.2);
-  const depthTravel = Math.max(size.z * 0.46, 4.6);
-
-  const root = new THREE.Group();
-  root.position.set(0, bounds.max.y + size.y * 0.12, 0);
-
-  const shellMaterial = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.18, roughness: 0.34 });
-  const highlightMaterial = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x38bdf8, emissiveIntensity: 0.36, metalness: 0.15, roughness: 0.26 });
-  const liftMaterial = new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x22c55e, emissiveIntensity: 0.28, metalness: 0.12, roughness: 0.3 });
-  const depthMaterial = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.22, metalness: 0.14, roughness: 0.3 });
-  const cylinderMaterial = new THREE.MeshStandardMaterial({ color: 0xeab308, emissive: 0xeab308, emissiveIntensity: 0.3, metalness: 0.12, roughness: 0.25 });
-
-  root.add(new THREE.Mesh(new THREE.BoxGeometry(trackSpan, 0.22, 0.36), shellMaterial));
-
-  const leftSupport = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.8, 0.24), shellMaterial);
-  leftSupport.position.set(-trackSpan * 0.48, -0.42, 0);
-  root.add(leftSupport);
-  const rightSupport = leftSupport.clone();
-  rightSupport.position.x = trackSpan * 0.48;
-  root.add(rightSupport);
-
-  const xCarriage = new THREE.Group();
-  xCarriage.add(new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.42, 0.55), highlightMaterial));
-  const mast = new THREE.Mesh(new THREE.BoxGeometry(0.18, verticalDrop, 0.18), shellMaterial);
-  mast.position.set(0, -verticalDrop * 0.5, 0);
-  xCarriage.add(mast);
-  root.add(xCarriage);
-
-  const yCarriage = new THREE.Group();
-  yCarriage.position.set(0, -verticalDrop * 0.18, 0);
-  yCarriage.add(new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.52, 0.62), liftMaterial));
-  const depthBeam = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, depthTravel), depthMaterial);
-  depthBeam.position.set(0, 0, depthTravel * 0.5);
-  yCarriage.add(depthBeam);
-  xCarriage.add(yCarriage);
-
-  const zCarriage = new THREE.Group();
-  zCarriage.position.set(0, 0, depthTravel * 0.1);
-  zCarriage.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.46, 0.5), depthMaterial));
-  const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.7, 16), shellMaterial);
-  nozzle.position.set(0, -0.94, 0.2);
-  zCarriage.add(nozzle);
-  const cylinderRod = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 1.35), cylinderMaterial);
-  cylinderRod.position.set(0, -0.94, 0.28);
-  zCarriage.add(cylinderRod);
-  const pulseRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.45, 0.045, 10, 40),
-    new THREE.MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.45 }),
-  );
-  pulseRing.rotation.x = Math.PI / 2;
-  pulseRing.position.set(0, -1.74, 0.88);
-  zCarriage.add(pulseRing);
-  yCarriage.add(zCarriage);
-
-  return {
-    root,
-    xCarriage,
-    yCarriage,
-    zCarriage,
-    cylinderRod,
-    pulseRing,
-    xRange: [-trackSpan * 0.44, trackSpan * 0.44],
-    yRange: [-verticalDrop * 0.88, -verticalDrop * 0.12],
-    zRange: [-depthTravel * 0.08, depthTravel * 0.66],
-    cylinderRange: [0.28, 1.2],
-  };
-};
-
-export const mountDashboardScene = ({ mount, axisRef, cylinderRef, onModelState }: MountSceneOptions) => {
-  onModelState('loading');
-
-  let disposed = false;
+export const mountDashboardScene = ({
+  mount,
+  axisRef,
+  cylinderRef,
+  cameraOnlineRef,
+  activeTrayRef,
+  onActiveTrayChange,
+  onLog,
+}: MountSceneOptions) => {
   let frameId = 0;
-  let motionRig: MotionRig | null = null;
+  let highlightedTrayId: TrayId | null = null;
+  let carriedTray: TrayGroup | null = null;
+
+  const allTrays = new Map<TrayId, TrayGroup>();
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x071321, 18, 58);
+  scene.fog = new THREE.Fog(0x0b1120, 90, 180);
 
-  const camera = new THREE.PerspectiveCamera(40, (mount.clientWidth || 800) / (mount.clientHeight || 600), 0.1, 1000);
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(mount.clientWidth || 800, mount.clientHeight || 600);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.08;
-  renderer.domElement.style.touchAction = 'none';
   mount.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(45, (mount.clientWidth || 800) / (mount.clientHeight || 600), 0.1, 1000);
+  camera.position.set(40, 40, 60);
+  camera.lookAt(0, 10, 0);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.autoRotate = false;
-  controls.minDistance = 9;
-  controls.maxDistance = 42;
+  controls.target.set(0, 10, 0);
+  controls.minDistance = 18;
+  controls.maxDistance = 120;
   controls.minPolarAngle = Math.PI * 0.16;
-  controls.maxPolarAngle = Math.PI * 0.49;
-  controls.screenSpacePanning = true;
-  controls.target.set(0, 4, 0);
+  controls.maxPolarAngle = Math.PI * 0.48;
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.9));
-  scene.add(new THREE.HemisphereLight(0x93c5fd, 0x020617, 1.15));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
 
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.45);
-  keyLight.position.set(14, 18, 12);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  keyLight.position.set(20, 40, 20);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.set(2048, 2048);
-  keyLight.shadow.bias = -0.0002;
   scene.add(keyLight);
 
-  const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.95);
-  fillLight.position.set(-12, 9, -10);
+  const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.4);
+  fillLight.position.set(-20, 12, -18);
   scene.add(fillLight);
 
-  const stage = new THREE.Group();
-  scene.add(stage);
+  scene.add(new THREE.GridHelper(120, 60, 0x3b82f6, 0x1e293b));
 
-  const floor = new THREE.Mesh(new THREE.CircleGeometry(19, 96), new THREE.MeshStandardMaterial({ color: 0x08111d, metalness: 0.08, roughness: 0.94 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.receiveShadow = true;
-  stage.add(floor);
+  const aluminumMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.6, roughness: 0.3 });
+  const trayMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.9 });
+  const trayHighlightMat = new THREE.MeshStandardMaterial({
+    color: 0x3b82f6,
+    roughness: 0.3,
+    emissive: 0x1d4ed8,
+    emissiveIntensity: 0.4,
+  });
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.8 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.48 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.3, roughness: 0.35 });
+  const forkMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.28, metalness: 0.18 });
 
-  const grid = new THREE.GridHelper(32, 20, 0x1d4ed8, 0x0f172a);
-  grid.position.y = 0.02;
-  (grid.material as THREE.Material).transparent = true;
-  (grid.material as THREE.Material).opacity = 0.18;
-  stage.add(grid);
+  const rackGroup = new THREE.Group();
+  rackGroup.position.set(0, 0, -12);
+  scene.add(rackGroup);
 
-  const halo = new THREE.Mesh(
-    new THREE.RingGeometry(8.8, 13.2, 64),
-    new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.11, side: THREE.DoubleSide }),
-  );
-  halo.rotation.x = -Math.PI / 2;
-  halo.position.y = 0.03;
-  stage.add(halo);
+  ([
+    [-20, 17.5, -7.5],
+    [20, 17.5, -7.5],
+    [-20, 17.5, 7.5],
+    [20, 17.5, 7.5],
+  ] as const).forEach((position) => {
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(1, 35, 1), aluminumMat);
+    pillar.position.set(position[0], position[1], position[2]);
+    pillar.castShadow = true;
+    pillar.receiveShadow = true;
+    rackGroup.add(pillar);
+  });
 
-  const modelRoot = new THREE.Group();
-  stage.add(modelRoot);
+  const layerHeights = [4.5, 16.5, 28.5];
+  layerHeights.forEach((y, layerIndex) => {
+    const frontBeam = new THREE.Mesh(new THREE.BoxGeometry(41, 1, 1), aluminumMat);
+    frontBeam.position.set(0, y - 0.5, 7.5);
+    rackGroup.add(frontBeam);
 
-  new GLTFLoader().load(
-    MODEL_URL,
-    (gltf) => {
-      if (disposed) {
-        return;
+    const backBeam = new THREE.Mesh(new THREE.BoxGeometry(41, 1, 1), aluminumMat);
+    backBeam.position.set(0, y - 0.5, -7.5);
+    rackGroup.add(backBeam);
+
+    [[-19.5, -10.5], [-4.5, 4.5], [10.5, 19.5]].forEach(([leftX, rightX]) => {
+      const leftSlide = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 14), aluminumMat);
+      leftSlide.position.set(leftX, y - 0.25, 0);
+      rackGroup.add(leftSlide);
+
+      const rightSlide = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 14), aluminumMat);
+      rightSlide.position.set(rightX, y - 0.25, 0);
+      rackGroup.add(rightSlide);
+    });
+
+    [-15, 0, 15].forEach((trayX, columnIndex) => {
+      const trayId = `${layerIndex + 1}-${columnIndex + 1}` as TrayId;
+      const trayGroup = new THREE.Group() as TrayGroup;
+      trayGroup.position.set(trayX, y, 0);
+
+      const trayBase = new THREE.Mesh(new THREE.BoxGeometry(10, 0.5, 13), trayMat);
+      trayBase.position.set(0, 0.75, 0);
+      trayBase.castShadow = true;
+      trayBase.receiveShadow = true;
+      trayGroup.add(trayBase);
+
+      const runnerLeft = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 13), trayMat);
+      runnerLeft.position.set(-4.5, 0.25, 0);
+      trayGroup.add(runnerLeft);
+
+      const runnerRight = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 13), trayMat);
+      runnerRight.position.set(4.5, 0.25, 0);
+      trayGroup.add(runnerRight);
+
+      for (let px = -2; px <= 2; px += 4) {
+        for (let pz = -4; pz <= 4; pz += 4) {
+          const plant = new THREE.Mesh(new THREE.DodecahedronGeometry(1.2), leafMat);
+          plant.position.set(px, 1.5, pz);
+          plant.castShadow = true;
+          trayGroup.add(plant);
+        }
       }
 
-      gltf.scene.traverse((child) => {
-        if (!(child instanceof THREE.Mesh)) {
-          return;
+      trayGroup.userData = {
+        trayId,
+        trayBase,
+        physicalState: 'rack',
+      };
+
+      allTrays.set(trayId, trayGroup);
+      rackGroup.add(trayGroup);
+    });
+  });
+
+  const waterStationGroup = new THREE.Group();
+  waterStationGroup.position.set(-30, 0, -12);
+  scene.add(waterStationGroup);
+
+  ([
+    [-5, 3, -6],
+    [5, 3, -6],
+    [-5, 3, 6],
+    [5, 3, 6],
+  ] as const).forEach((position) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(1, 6, 1), darkMat);
+    leg.position.set(position[0], position[1], position[2]);
+    waterStationGroup.add(leg);
+  });
+
+  const stationLeft = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 14), aluminumMat);
+  stationLeft.position.set(-4.5, 4.5, 0);
+  waterStationGroup.add(stationLeft);
+
+  const stationRight = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 14), aluminumMat);
+  stationRight.position.set(4.5, 4.5, 0);
+  waterStationGroup.add(stationRight);
+
+  const sprinkler = new THREE.Mesh(new THREE.CylinderGeometry(2, 2, 0.5, 16), new THREE.MeshStandardMaterial({ color: 0x3b82f6 }));
+  sprinkler.position.set(0, 15, 0);
+  waterStationGroup.add(sprinkler);
+
+  const proxyRobot = new THREE.Group();
+  proxyRobot.position.set(0, 0, 5);
+  scene.add(proxyRobot);
+
+  const track = new THREE.Mesh(new THREE.BoxGeometry(70, 1, 6), darkMat);
+  track.position.set(-5, 0.5, 0);
+  proxyRobot.add(track);
+
+  const axisXPart = new THREE.Group();
+  axisXPart.position.set(0, 1, 0);
+  proxyRobot.add(axisXPart);
+
+  const xBaseMesh = new THREE.Mesh(new THREE.BoxGeometry(17.5, 1.5, 17.5), frameMat);
+  xBaseMesh.position.set(0, 0.75, 0);
+  axisXPart.add(xBaseMesh);
+
+  const pillarGeometry = new THREE.BoxGeometry(1.5, 36, 1.5);
+  [-8, 8].forEach((x) => {
+    [-8, 8].forEach((z) => {
+      const pillar = new THREE.Mesh(pillarGeometry, frameMat);
+      pillar.position.set(x, 18, z);
+      axisXPart.add(pillar);
+    });
+  });
+
+  [
+    { geometry: new THREE.BoxGeometry(17.5, 1.5, 1.5), position: [0, 36.75, -8] as const },
+    { geometry: new THREE.BoxGeometry(17.5, 1.5, 1.5), position: [0, 36.75, 8] as const },
+    { geometry: new THREE.BoxGeometry(1.5, 1.5, 17.5), position: [-8, 36.75, 0] as const },
+    { geometry: new THREE.BoxGeometry(1.5, 1.5, 17.5), position: [8, 36.75, 0] as const },
+  ].forEach(({ geometry, position }) => {
+    const beam = new THREE.Mesh(geometry, frameMat);
+    beam.position.set(position[0], position[1], position[2]);
+    axisXPart.add(beam);
+  });
+
+  const axisYPart = new THREE.Group();
+  axisYPart.position.set(0, AXIS_RANGE.y.min * SCENE_AXIS_SCALE, 0);
+  axisXPart.add(axisYPart);
+
+  const liftFrame = new THREE.Mesh(new THREE.BoxGeometry(14, 1.5, 14), new THREE.MeshStandardMaterial({ color: 0x22c55e }));
+  liftFrame.position.set(0, -1, 0);
+  axisYPart.add(liftFrame);
+
+  const cylBase = new THREE.Mesh(new THREE.BoxGeometry(12, 1, 8), darkMat);
+  cylBase.position.set(0, -0.2, 0);
+  axisYPart.add(cylBase);
+
+  const cylinderPart = new THREE.Mesh(new THREE.BoxGeometry(8, 0.4, 14), forkMat);
+  cylinderPart.position.set(0, 0.5, 0);
+  cylinderPart.castShadow = true;
+  cylinderPart.receiveShadow = true;
+  axisYPart.add(cylinderPart);
+
+  const cameraGroup = new THREE.Group();
+  const cameraBody = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 2.5), darkMat);
+  const cameraLens = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.8, 16), new THREE.MeshStandardMaterial({ color: 0x0f172a }));
+  cameraLens.rotation.x = Math.PI / 2;
+  cameraLens.position.z = 1.25;
+  const cameraIndicatorLight = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xef4444 }),
+  );
+  cameraIndicatorLight.position.set(0.5, 0.6, 1);
+  cameraGroup.add(cameraBody, cameraLens, cameraIndicatorLight);
+  cameraGroup.position.set(20, 30, 20);
+  cameraGroup.lookAt(-10, 5, -5);
+  scene.add(cameraGroup);
+
+  const updateActiveTrayHighlight = (nextTrayId: TrayId) => {
+    if (highlightedTrayId === nextTrayId) {
+      return;
+    }
+
+    if (highlightedTrayId) {
+      const previousTray = allTrays.get(highlightedTrayId);
+      if (previousTray) {
+        previousTray.userData.trayBase.material = trayMat;
+      }
+    }
+
+    const nextTray = allTrays.get(nextTrayId);
+    if (nextTray) {
+      nextTray.userData.trayBase.material = trayHighlightMat;
+    }
+
+    highlightedTrayId = nextTrayId;
+  };
+
+  const syncCameraIndicator = () => {
+    (cameraIndicatorLight.material as THREE.MeshBasicMaterial).color.setHex(cameraOnlineRef.current ? 0x22c55e : 0xef4444);
+  };
+
+  const carryTrayFromRack = (tray: TrayGroup, trayId: TrayId) => {
+    cylinderPart.attach(tray);
+    tray.position.set(0, -0.4, 0);
+    tray.rotation.set(0, 0, 0);
+    tray.userData.physicalState = 'fork';
+    carriedTray = tray;
+    onActiveTrayChange(trayId);
+    onLog('物理', `[${trayId}] 苗盘已被平稳托起。`, 'success');
+  };
+
+  const returnTrayToRack = (tray: TrayGroup, trayId: TrayId) => {
+    const coords = getTrayCoords(trayId);
+    rackGroup.attach(tray);
+    tray.position.set(coords.rack3DX, coords.rack3DY, 0);
+    tray.rotation.set(0, 0, 0);
+    tray.userData.physicalState = 'rack';
+    carriedTray = null;
+    onLog('物理', `[${trayId}] 苗盘安全放入槽内。`, 'success');
+  };
+
+  const placeTrayOnStation = (tray: TrayGroup) => {
+    waterStationGroup.attach(tray);
+    tray.position.set(0, 4.5, 0);
+    tray.rotation.set(0, 0, 0);
+    tray.userData.physicalState = 'station';
+    carriedTray = null;
+    onLog('物理', '苗盘平稳放置于加水台。', 'success');
+  };
+
+  const pickTrayFromStation = (tray: TrayGroup) => {
+    cylinderPart.attach(tray);
+    tray.position.set(0, -0.4, 0);
+    tray.rotation.set(0, 0, 0);
+    tray.userData.physicalState = 'fork';
+    carriedTray = tray;
+    onLog('物理', '从加水台重新接管苗盘。', 'success');
+  };
+
+  const updatePhysicsInteraction = () => {
+    if (!cylinderRef.current) {
+      return;
+    }
+
+    const vx = axisRef.current.x;
+    const vy = axisRef.current.y;
+
+    for (const [trayId, tray] of allTrays) {
+      const coords = getTrayCoords(trayId);
+
+      if (Math.abs(vx - coords.x) <= 2) {
+        if (vy > coords.yBase + 1 && vy < coords.yBase + 10 && tray.userData.physicalState === 'rack' && !carriedTray) {
+          carryTrayFromRack(tray, trayId);
+          continue;
         }
 
-        child.castShadow = true;
-        child.receiveShadow = true;
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        materials.forEach((material) => {
-          const candidate = material as THREE.Material & { map?: THREE.Texture };
-          if (candidate.map) {
-            candidate.map.colorSpace = THREE.SRGBColorSpace;
-          }
-          candidate.needsUpdate = true;
-        });
-      });
-
-      if (needsDisplayColor(gltf.scene)) {
-        applyDisplayPalette(gltf.scene);
+        if (vy <= coords.yBase + 1 && tray.userData.physicalState === 'fork' && carriedTray === tray) {
+          returnTrayToRack(tray, trayId);
+          continue;
+        }
       }
 
-      const bounds = normalizeModel(gltf.scene, 18);
-      modelRoot.add(gltf.scene);
-      motionRig = buildMotionRig(bounds);
-      stage.add(motionRig.root);
-      fitCamera(camera, controls, stage, (mount.clientWidth || 800) / (mount.clientHeight || 600));
-      onModelState('ready');
-    },
-    undefined,
-    () => {
-      if (disposed) {
-        return;
-      }
+      if (Math.abs(vx - WATER_STATION_COORDS.x) <= 2) {
+        if (vy <= WATER_STATION_COORDS.yBase + 1 && tray.userData.physicalState === 'fork' && carriedTray === tray) {
+          placeTrayOnStation(tray);
+          continue;
+        }
 
-      const fallback = new THREE.Mesh(
-        new THREE.BoxGeometry(14, 8, 8),
-        new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.12, roughness: 0.68, wireframe: true }),
-      );
-      fallback.position.y = 4;
-      modelRoot.add(fallback);
-      motionRig = buildMotionRig(new THREE.Box3(new THREE.Vector3(-7, 0, -4), new THREE.Vector3(7, 8, 4)));
-      stage.add(motionRig.root);
-      fitCamera(camera, controls, stage, (mount.clientWidth || 800) / (mount.clientHeight || 600));
-      onModelState('error');
-    },
-  );
+        if (
+          vy > WATER_STATION_COORDS.yBase + 1 &&
+          vy < WATER_STATION_COORDS.yBase + 10 &&
+          tray.userData.physicalState === 'station' &&
+          !carriedTray
+        ) {
+          pickTrayFromStation(tray);
+        }
+      }
+    }
+  };
+
+  updateActiveTrayHighlight(activeTrayRef.current);
+  syncCameraIndicator();
 
   const resize = () => {
     const width = mount.clientWidth || 800;
@@ -349,13 +391,15 @@ export const mountDashboardScene = ({ mount, axisRef, cylinderRef, onModelState 
   const animate = () => {
     frameId = window.requestAnimationFrame(animate);
 
-    if (motionRig) {
-      motionRig.xCarriage.position.x = THREE.MathUtils.lerp(motionRig.xCarriage.position.x, mapRange(axisRef.current.x, AXIS_RANGE.x.min, AXIS_RANGE.x.max, motionRig.xRange[0], motionRig.xRange[1]), 0.12);
-      motionRig.yCarriage.position.y = THREE.MathUtils.lerp(motionRig.yCarriage.position.y, mapRange(axisRef.current.y, AXIS_RANGE.y.min, AXIS_RANGE.y.max, motionRig.yRange[0], motionRig.yRange[1]), 0.12);
-      motionRig.zCarriage.position.z = THREE.MathUtils.lerp(motionRig.zCarriage.position.z, mapRange(axisRef.current.z, AXIS_RANGE.z.min, AXIS_RANGE.z.max, motionRig.zRange[0], motionRig.zRange[1]), 0.12);
-      motionRig.cylinderRod.position.z = THREE.MathUtils.lerp(motionRig.cylinderRod.position.z, cylinderRef.current ? motionRig.cylinderRange[1] : motionRig.cylinderRange[0], 0.18);
-      motionRig.pulseRing.rotation.z += 0.018;
-      (motionRig.pulseRing.material as THREE.MeshBasicMaterial).opacity = 0.22 + (Math.sin(performance.now() * 0.003) + 1) * 0.14;
+    axisXPart.position.x = THREE.MathUtils.lerp(axisXPart.position.x, axisRef.current.x * SCENE_AXIS_SCALE, 0.12);
+    axisYPart.position.y = THREE.MathUtils.lerp(axisYPart.position.y, axisRef.current.y * SCENE_AXIS_SCALE, 0.12);
+    cylinderPart.position.z = THREE.MathUtils.lerp(cylinderPart.position.z, cylinderRef.current ? -14 : 0, 0.18);
+
+    updateActiveTrayHighlight(activeTrayRef.current);
+    syncCameraIndicator();
+
+    if (cylinderRef.current || carriedTray) {
+      updatePhysicsInteraction();
     }
 
     controls.update();
@@ -366,11 +410,10 @@ export const mountDashboardScene = ({ mount, axisRef, cylinderRef, onModelState 
   window.addEventListener('resize', resize);
 
   return () => {
-    disposed = true;
     window.cancelAnimationFrame(frameId);
     window.removeEventListener('resize', resize);
     controls.dispose();
-    stage.traverse((child) => {
+    scene.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         child.geometry.dispose();
         disposeMaterial(child.material);
