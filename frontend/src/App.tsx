@@ -19,6 +19,7 @@ import {
   AXIS_RANGE,
   DEFAULT_TRAY_ID,
   DETAIL_PANEL_DATA,
+  DISPLAY_AXIS_RANGE,
   MAX_LOGS,
   SENSOR_BAR_WIDTHS,
   SENSOR_CONFIG,
@@ -26,10 +27,12 @@ import {
   WATER_STATION_COORDS,
   clamp,
   createSensorSnapshot,
+  displayToInternalAxis,
   formatSensorValue,
   formatTrayTarget,
   getTimestamp,
   getTrayCoords,
+  internalToDisplayAxis,
   type AxisPosition,
   type CameraDeviceState,
   type CameraKey,
@@ -52,7 +55,20 @@ type AiMarkers = {
   targetLocked: boolean;
 };
 
+type RemoteAxisSnapshot = {
+  connected: boolean;
+  gateway?: string;
+  status?: string;
+  time?: string;
+  x: number | null;
+  y: number | null;
+  z: number | null;
+};
+
+type RemoteGatewayState = 'idle' | 'gateway_offline' | 'plc_offline' | 'online';
+
 const DEFAULT_AI_MARKERS: AiMarkers = { scanning: false, targetLocked: false };
+const REMOTE_AXIS_ENDPOINT = 'http://127.0.0.1:8765/api/axis';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
@@ -110,6 +126,8 @@ const App = () => {
   const abortAiRef = useRef(false);
   const eStopTimerRef = useRef<number | null>(null);
   const motionFrameRef = useRef<number | null>(null);
+  const remotePollTimerRef = useRef<number | null>(null);
+  const remoteGatewayStateRef = useRef<RemoteGatewayState>('idle');
 
   axisRef.current = axis;
   cylinderRef.current = cylinderExtended;
@@ -127,6 +145,12 @@ const App = () => {
   const setAxisState = (nextAxis: AxisPosition) => {
     axisRef.current = nextAxis;
     setAxis(nextAxis);
+  };
+
+  const setCylinderState = (nextState: boolean) => {
+    cylinderRef.current = nextState;
+    setCylinderExtended(nextState);
+    setCylinderLabel(nextState ? '伸出介入' : '缩回脱离');
   };
 
   const setWorkingState = (next: boolean) => {
@@ -244,14 +268,16 @@ const App = () => {
       return false;
     }
 
-    cylinderRef.current = nextState;
-    setCylinderExtended(nextState);
-    setCylinderLabel(nextState ? '伸出介入' : '缩回脱离');
+    setCylinderState(nextState);
     await sleep(800);
     return !eStopRef.current;
   };
 
   const moveAxis = (key: 'x' | 'y', value: number) => {
+    if (viewMode !== 'virtual') {
+      return;
+    }
+
     if (key === 'x' && (!links.motors || !motors.x || isWorking || eStopActive || cylinderExtended)) {
       return;
     }
@@ -349,6 +375,11 @@ const App = () => {
       return;
     }
 
+    if (viewMode !== 'virtual') {
+      addLog('远程监控', '远程监控模式下不启用本地回原动作', 'warn');
+      return;
+    }
+
     if (!linksRef.current.motors || !motorsRef.current.x || !motorsRef.current.y) {
       addLog('运动', '脱机失败', 'error');
       return;
@@ -383,6 +414,11 @@ const App = () => {
   };
 
   const startAIInspection = async () => {
+    if (viewMode !== 'virtual') {
+      addLog('远程监控', '远程监控模式下不启用本地仿真流程', 'warn');
+      return;
+    }
+
     if (isWorkingRef.current || aiRunning) {
       addLog('MES', '执行中，禁重复', 'warn');
       return;
@@ -544,6 +580,11 @@ const App = () => {
   };
 
   const emergencyStop = () => {
+    if (viewMode !== 'virtual') {
+      addLog('远程监控', '远程监控模式下不启用本地急停逻辑', 'warn');
+      return;
+    }
+
     if (eStopRef.current) {
       return;
     }
@@ -589,6 +630,10 @@ const App = () => {
       if (motionFrameRef.current !== null) {
         window.cancelAnimationFrame(motionFrameRef.current);
       }
+
+      if (remotePollTimerRef.current !== null) {
+        window.clearTimeout(remotePollTimerRef.current);
+      }
     };
   }, []);
 
@@ -614,16 +659,103 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    if (viewMode !== 'remote') {
+      remoteGatewayStateRef.current = 'idle';
+      if (remotePollTimerRef.current !== null) {
+        window.clearTimeout(remotePollTimerRef.current);
+        remotePollTimerRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollRemoteAxis = async () => {
+      try {
+        const response = await fetch(REMOTE_AXIS_ENDPOINT, { cache: 'no-store' });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const snapshot = (await response.json()) as RemoteAxisSnapshot;
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!snapshot.connected) {
+          setYLimitWarning(false);
+          if (remoteGatewayStateRef.current !== 'plc_offline') {
+            addLog('远程监控', 'plc_monitor.py 已启动，但 PLC 当前离线', 'warn');
+            remoteGatewayStateRef.current = 'plc_offline';
+          }
+        } else {
+          const nextAxisX =
+            typeof snapshot.x === 'number' ? displayToInternalAxis('x', snapshot.x) : axisRef.current.x;
+          const nextAxisY =
+            typeof snapshot.y === 'number' ? displayToInternalAxis('y', snapshot.y) : axisRef.current.y;
+
+          setAxisState({ x: nextAxisX, y: nextAxisY });
+
+          if (typeof snapshot.y === 'number') {
+            setYLimitWarning(snapshot.y < DISPLAY_AXIS_RANGE.y.bottom || snapshot.y > DISPLAY_AXIS_RANGE.y.top);
+          } else {
+            setYLimitWarning(false);
+          }
+
+          if (snapshot.z === 0 || snapshot.z === 1) {
+            setCylinderState(snapshot.z === 1);
+          }
+
+          if (remoteGatewayStateRef.current !== 'online') {
+            addLog('远程监控', '已接入 plc_monitor.py 实时轴数据', 'success');
+            remoteGatewayStateRef.current = 'online';
+          }
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        if (remoteGatewayStateRef.current !== 'gateway_offline') {
+          addLog('远程监控', `无法连接 Python 数据接口 ${REMOTE_AXIS_ENDPOINT}`, 'error');
+          remoteGatewayStateRef.current = 'gateway_offline';
+        }
+      } finally {
+        if (!cancelled) {
+          remotePollTimerRef.current = window.setTimeout(pollRemoteAxis, 500);
+        }
+      }
+    };
+
+    void pollRemoteAxis();
+
+    return () => {
+      cancelled = true;
+      if (remotePollTimerRef.current !== null) {
+        window.clearTimeout(remotePollTimerRef.current);
+        remotePollTimerRef.current = null;
+      }
+    };
+  }, [viewMode]);
+
+  useEffect(() => {
     if (!cameraOnline) {
       setAiMarkers(DEFAULT_AI_MARKERS);
     }
   }, [cameraOnline]);
 
-  const canMoveX = !eStopActive && !isWorking && links.motors && motors.x && !cylinderExtended;
-  const canMoveY = !eStopActive && !isWorking && links.motors && motors.y;
-  const canToggleCylinder = !eStopActive && !isWorking && links.motors && motors.cyl;
+  const canMoveX = viewMode === 'virtual' && !eStopActive && !isWorking && links.motors && motors.x && !cylinderExtended;
+  const canMoveY = viewMode === 'virtual' && !eStopActive && !isWorking && links.motors && motors.y;
+  const canToggleCylinder = viewMode === 'virtual' && !eStopActive && !isWorking && links.motors && motors.cyl;
+  const canUseVirtualActions = viewMode === 'virtual';
   const syncStatusClass = viewMode === 'virtual' ? 'ml-3 text-xs text-yellow-400' : 'ml-3 text-xs text-green-400';
   const syncStatusText = viewMode === 'virtual' ? '脱机仿真/拓扑构建中' : 'PLC 虚实连动中';
+  const axisDisplay = {
+    x: internalToDisplayAxis('x', axis.x),
+    y: internalToDisplayAxis('y', axis.y),
+  };
   const pcPlcLedClass = viewMode === 'virtual' ? 'status-warn' : 'status-on';
   const getLeafLedClass = (key: LinkKey) =>
     links[key] ? (viewMode === 'virtual' ? 'status-warn' : 'status-on') : 'status-off';
@@ -687,10 +819,10 @@ const App = () => {
               <button
                 type="button"
                 onClick={() => void startAIInspection()}
-                disabled={isWorking || eStopActive}
+                disabled={!canUseVirtualActions || isWorking || eStopActive}
                 className={classNames(
                   'group relative flex w-full shrink-0 items-center justify-center gap-2 overflow-hidden rounded border border-indigo-400/50 bg-gradient-to-r from-indigo-600 to-purple-600 py-2 font-bold text-white shadow-[0_0_10px_rgba(79,70,229,0.5)] transition-all',
-                  (isWorking || eStopActive) && 'cursor-not-allowed opacity-50',
+                  (!canUseVirtualActions || isWorking || eStopActive) && 'cursor-not-allowed opacity-50',
                 )}
               >
                 <div className="absolute inset-0 h-full w-full -translate-x-full bg-white/20 group-hover:animate-[shimmer_1s_forwards]" />
@@ -702,9 +834,11 @@ const App = () => {
                 <button
                   type="button"
                   onClick={() => void moveToPosition('home')}
+                  disabled={!canUseVirtualActions}
                   className={classNames(
                     'flex flex-1 items-center justify-center gap-1 rounded border border-blue-500 bg-blue-700/80 py-1.5 text-xs text-white shadow-md transition-all hover:bg-blue-600',
-                    needsHoming && 'animate-pulse ring-2 ring-red-500',
+                    needsHoming && canUseVirtualActions && 'animate-pulse ring-2 ring-red-500',
+                    !canUseVirtualActions && 'cursor-not-allowed opacity-50',
                   )}
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -713,7 +847,11 @@ const App = () => {
                 <button
                   type="button"
                   onClick={emergencyStop}
-                  className="flex flex-1 items-center justify-center gap-1 rounded border border-red-500 bg-red-700/80 py-1.5 text-xs text-white shadow-md transition-colors hover:bg-red-600"
+                  disabled={!canUseVirtualActions}
+                  className={classNames(
+                    'flex flex-1 items-center justify-center gap-1 rounded border border-red-500 bg-red-700/80 py-1.5 text-xs text-white shadow-md transition-colors hover:bg-red-600',
+                    !canUseVirtualActions && 'cursor-not-allowed opacity-50',
+                  )}
                 >
                   <Hand className="h-3.5 w-3.5" />
                   紧急停止
@@ -777,6 +915,7 @@ const App = () => {
               <AxisControlCard
                 label="轴 (水平平移)"
                 value={axis.x}
+                displayValue={axisDisplay.x}
                 min={AXIS_RANGE.x.min}
                 max={AXIS_RANGE.x.max}
                 colorClass="text-red-400"
@@ -789,6 +928,7 @@ const App = () => {
               <AxisControlCard
                 label="轴 (垂直升降)"
                 value={axis.y}
+                displayValue={axisDisplay.y}
                 min={AXIS_RANGE.y.min}
                 max={AXIS_RANGE.y.max}
                 colorClass="text-green-400"
@@ -849,6 +989,16 @@ const App = () => {
             </div>
 
             <div ref={mountRef} className="h-full w-full rounded-md bg-[radial-gradient(circle_at_center,_#1e293b_0%,_#0f172a_100%)]" />
+
+            <div className="pointer-events-none absolute right-3 top-3 rounded border border-slate-600 bg-slate-900/75 px-2 py-1 font-mono text-[10px] text-cyan-300 backdrop-blur-sm">
+              Y = {DISPLAY_AXIS_RANGE.y.top} mm
+            </div>
+            <div className="pointer-events-none absolute bottom-3 left-3 rounded border border-slate-600 bg-slate-900/75 px-2 py-1 font-mono text-[10px] text-rose-300 backdrop-blur-sm">
+              X = {DISPLAY_AXIS_RANGE.x.left} mm
+            </div>
+            <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-cyan-500/60 bg-slate-900/80 px-2 py-1 font-mono text-[10px] text-cyan-200 shadow-lg backdrop-blur-sm">
+              (0,0)
+            </div>
 
             <div className="pointer-events-none absolute bottom-3 left-1/2 flex w-max -translate-x-1/2 items-center gap-2 rounded-full border border-slate-700 bg-slate-900/60 px-4 py-1.5 text-[11px] text-slate-300 shadow-lg backdrop-blur-sm">
               <Monitor className="h-3.5 w-3.5 text-blue-400" />
@@ -1048,7 +1198,7 @@ const App = () => {
                     <div className="absolute bottom-1 right-1 text-right font-mono text-[8px] text-green-300">
                       <div className="animate-pulse">REC 1080P</div>
                       <div>
-                        POS: X:{axis.x.toFixed(1)} Y:{axis.y.toFixed(1)}
+                        POS: X:{axisDisplay.x.toFixed(1)} Y:{axisDisplay.y.toFixed(1)}
                       </div>
                     </div>
                     {aiMarkers.scanning ? <div className="camera-scan-line absolute inset-0" /> : null}
@@ -1258,6 +1408,7 @@ const PanelHeader = ({
 const AxisControlCard = ({
   label,
   value,
+  displayValue,
   min,
   max,
   colorClass,
@@ -1268,6 +1419,7 @@ const AxisControlCard = ({
 }: {
   label: string;
   value: number;
+  displayValue?: number;
   min: number;
   max: number;
   colorClass: string;
@@ -1280,7 +1432,7 @@ const AxisControlCard = ({
     <div className="mb-1 flex items-center justify-between">
       <span className={classNames('text-[11px] font-bold', colorClass)}>{label}</span>
       <span className="lcd-text rounded border border-slate-600 bg-slate-900 px-2 py-0.5 text-[11px] text-white">
-        {(value > 0 ? '+' : '') + value.toFixed(1)} mm
+        {(typeof displayValue === 'number' ? displayValue : value).toFixed(1)} mm
       </span>
     </div>
     <input

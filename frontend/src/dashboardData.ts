@@ -83,6 +83,11 @@ export const AXIS_RANGE = {
   y: { min: 12, max: 105 },
 } as const;
 
+export const DISPLAY_AXIS_RANGE = {
+  x: { left: 588, right: 0 },
+  y: { bottom: 0, top: 300 },
+} as const;
+
 export const WATER_STATION_COORDS = { x: -100, yBase: 14, yLift: 20 } as const;
 
 export const TRAY_OPTIONS: TrayOption[] = [
@@ -237,6 +242,41 @@ export const getTrayCoords = (trayId: TrayId): TrayCoords => {
 export const getTimestamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const interpolate = (
+  value: number,
+  inputStart: number,
+  inputEnd: number,
+  outputStart: number,
+  outputEnd: number,
+) => {
+  if (inputStart === inputEnd) {
+    return outputStart;
+  }
+
+  const ratio = (value - inputStart) / (inputEnd - inputStart);
+  return outputStart + ratio * (outputEnd - outputStart);
+};
+
+export const internalToDisplayAxis = (key: 'x' | 'y', value: number) => {
+  if (key === 'x') {
+    const clamped = clamp(value, AXIS_RANGE.x.min, AXIS_RANGE.x.max);
+    return interpolate(clamped, AXIS_RANGE.x.min, AXIS_RANGE.x.max, DISPLAY_AXIS_RANGE.x.left, DISPLAY_AXIS_RANGE.x.right);
+  }
+
+  const clamped = clamp(value, AXIS_RANGE.y.min, AXIS_RANGE.y.max);
+  return interpolate(clamped, AXIS_RANGE.y.min, AXIS_RANGE.y.max, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top);
+};
+
+export const displayToInternalAxis = (key: 'x' | 'y', value: number) => {
+  if (key === 'x') {
+    const clamped = clamp(value, DISPLAY_AXIS_RANGE.x.right, DISPLAY_AXIS_RANGE.x.left);
+    return interpolate(clamped, DISPLAY_AXIS_RANGE.x.left, DISPLAY_AXIS_RANGE.x.right, AXIS_RANGE.x.min, AXIS_RANGE.x.max);
+  }
+
+  const clamped = clamp(value, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top);
+  return interpolate(clamped, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top, AXIS_RANGE.y.min, AXIS_RANGE.y.max);
+};
 
 export const createSensorSnapshot = (): SensorSnapshot =>
   SENSOR_CONFIG.reduce((snapshot, config) => {
