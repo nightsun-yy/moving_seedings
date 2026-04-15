@@ -20,6 +20,7 @@ import {
   DEFAULT_TRAY_ID,
   DETAIL_PANEL_DATA,
   DISPLAY_AXIS_RANGE,
+  HOME_AXIS_POSITION,
   MAX_LOGS,
   SENSOR_BAR_WIDTHS,
   SENSOR_CONFIG,
@@ -76,7 +77,7 @@ const App = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('virtual');
   const [detailPanel, setDetailPanel] = useState<DetailPanelKey | null>(null);
   const [sensorValues, setSensorValues] = useState(() => createSensorSnapshot());
-  const [axis, setAxis] = useState<AxisPosition>({ x: 0, y: AXIS_RANGE.y.min });
+  const [axis, setAxis] = useState<AxisPosition>(HOME_AXIS_POSITION);
   const [cylinderExtended, setCylinderExtended] = useState(false);
   const [cylinderLabel, setCylinderLabel] = useState('收回状态');
   const [links, setLinks] = useState<LinkStatusMap>({ sensors: true, motors: true, camera: false });
@@ -395,13 +396,13 @@ const App = () => {
       await toggleCylinder(false, { force: true });
       needsHomingRef.current = false;
       setNeedsHoming(false);
-      await smoothMoveTo(axisRef.current.x, AXIS_RANGE.y.min, 800);
+      await smoothMoveTo(axisRef.current.x, HOME_AXIS_POSITION.y, 800);
 
       if (!ensureContinue()) {
         return;
       }
 
-      await smoothMoveTo(0, AXIS_RANGE.y.min, 1000);
+      await smoothMoveTo(HOME_AXIS_POSITION.x, HOME_AXIS_POSITION.y, 1000);
 
       if (!ensureContinue()) {
         return;
@@ -565,12 +566,12 @@ const App = () => {
     }
 
     addLog('运动', '直角梯次回原点...', 'info');
-    await smoothMoveTo(targetCoords.x, AXIS_RANGE.y.min, 800);
+    await smoothMoveTo(targetCoords.x, HOME_AXIS_POSITION.y, 800);
     if (!ensureContinue()) {
       return;
     }
 
-    await smoothMoveTo(0, AXIS_RANGE.y.min, 1200);
+    await smoothMoveTo(HOME_AXIS_POSITION.x, HOME_AXIS_POSITION.y, 1200);
     if (!ensureContinue()) {
       return;
     }

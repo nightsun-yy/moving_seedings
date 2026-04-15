@@ -88,6 +88,11 @@ export const DISPLAY_AXIS_RANGE = {
   y: { bottom: 0, top: 300 },
 } as const;
 
+export const HOME_AXIS_POSITION: AxisPosition = {
+  x: AXIS_RANGE.x.max,
+  y: AXIS_RANGE.y.min,
+};
+
 export const WATER_STATION_COORDS = { x: -100, yBase: 14, yLift: 20 } as const;
 
 export const TRAY_OPTIONS: TrayOption[] = [
