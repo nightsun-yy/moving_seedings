@@ -1,1364 +1,550 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import classNames from 'classnames';
 import {
-  Activity,
   Camera,
-  Droplets,
-  Power,
-  RefreshCw,
-  Search,
-  ShieldCheck,
-  Sun,
+  CheckCircle2,
+  Cpu,
+  House,
+  Link2,
+  Monitor,
+  Network,
+  Radar,
+  SlidersHorizontal,
+  Terminal,
   Thermometer,
+  Unplug,
+  XCircle,
 } from 'lucide-react';
-import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-
-type SystemMode = 'AUTO' | 'MANUAL' | 'SCANNING';
-type LogType = 'info' | 'success' | 'error';
-type RackStatus = 0 | 1 | 2 | 3;
-type DeviceState = 'online' | 'standby' | 'active' | 'offline';
-type LinkState = 'online' | 'active' | 'alert';
-type Tone = 'online' | 'active' | 'alert';
-type NodeId = 'ipc' | 'plc' | 'xAxis' | 'yAxis' | 'zAxis' | 'camera';
-
-type SysLogEntry = {
-  time: string;
-  msg: string;
-  type: LogType;
-};
-
-type EnvDataState = {
-  temp: number;
-  humidity: number;
-  light: number;
-};
-
-type ArmPosition = {
-  x: number;
-  y: number;
-  z: number;
-};
-
-type RackSlot = {
-  id: string;
-  x: number;
-  y: number;
-  status: RackStatus;
-};
-
-type MotionBounds = {
-  minX: number;
-  maxX: number;
-  minDepth: number;
-  maxDepth: number;
-  minHeight: number;
-  maxHeight: number;
-};
-
-type TwinObjects = {
-  xCarriage: THREE.Group;
-  yCarriage: THREE.Group;
-  zEffector: THREE.Group;
-  scanCone: THREE.Object3D;
-  motionBounds: MotionBounds | null;
-};
-
-type TopologyNode = {
-  id: NodeId;
-  label: string;
-  short: string;
-  role: string;
-  x: number;
-  y: number;
-  status: DeviceState;
-};
-
-type TopologyLink = {
-  id: string;
-  from: NodeId;
-  to: NodeId;
-  label: string;
-  detail: string;
-  status: LinkState;
-};
-
-type EnvDataProps = {
-  icon: ReactNode;
-  val: string;
-};
-
-type MetricCardProps = {
-  label: string;
-  value: string;
-  tone: Tone;
-};
-
-type StatusPillProps = {
-  label: string;
-  tone: Tone;
-};
-
-type TopologyNodeCardProps = {
-  node: TopologyNode;
-};
-
-type LinkStatusRowProps = {
-  link: TopologyLink;
-};
-
-const INITIAL_LOGS: SysLogEntry[] = [
-  {
-    time: new Date().toLocaleTimeString(),
-    msg: '系统初始化完成，3D 引擎与 PLC 通讯链路已就绪。',
-    type: 'info',
-  },
-];
-
-const INITIAL_RACK_STATE: RackSlot[] = [
-  { id: 'A1', x: 0, y: 2, status: 2 },
-  { id: 'A2', x: 1, y: 2, status: 1 },
-  { id: 'A3', x: 2, y: 2, status: 0 },
-  { id: 'B1', x: 0, y: 1, status: 2 },
-  { id: 'B2', x: 1, y: 1, status: 1 },
-  { id: 'B3', x: 2, y: 1, status: 3 },
-  { id: 'C1', x: 0, y: 0, status: 0 },
-  { id: 'C2', x: 1, y: 0, status: 0 },
-  { id: 'C3', x: 2, y: 0, status: 0 },
-];
-
-const DIRECTORY_MODEL_URL = '/models/master-layout.gltf';
-const AXIS_LIMITS = {
-  x: 2,
-  y: 2,
-  z: 1,
-} as const;
-const Z_TRAVEL_MM = 180;
-const DIRECTORY_DISPLAY_PALETTE = [0x475569, 0x64748b, 0x38bdf8, 0x22c55e, 0xf59e0b, 0x0f766e];
-
-const STATUS_PILL_STYLES: Record<Tone, string> = {
-  online: 'border-cyan-500/30 bg-cyan-500/12 text-cyan-200',
-  active: 'border-emerald-500/30 bg-emerald-500/12 text-emerald-200',
-  alert: 'border-amber-500/30 bg-amber-500/12 text-amber-200',
-};
-
-const METRIC_STYLES: Record<Tone, string> = {
-  online: 'border-cyan-500/25 bg-cyan-500/10 text-cyan-200',
-  active: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200',
-  alert: 'border-amber-500/25 bg-amber-500/10 text-amber-200',
-};
-
-const NODE_STATUS_META: Record<
-  DeviceState,
-  { label: string; border: string; dot: string; text: string }
-> = {
-  online: {
-    label: '在线',
-    border: 'border-cyan-500/30 bg-cyan-500/10',
-    dot: 'bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.8)]',
-    text: 'text-cyan-200',
-  },
-  standby: {
-    label: '待机',
-    border: 'border-slate-600/70 bg-slate-800/90',
-    dot: 'bg-slate-400 shadow-[0_0_12px_rgba(148,163,184,0.45)]',
-    text: 'text-slate-200',
-  },
-  active: {
-    label: '活跃',
-    border: 'border-emerald-500/35 bg-emerald-500/12',
-    dot: 'bg-emerald-400 shadow-[0_0_14px_rgba(74,222,128,0.9)]',
-    text: 'text-emerald-200',
-  },
-  offline: {
-    label: '离线',
-    border: 'border-red-500/30 bg-red-500/12',
-    dot: 'bg-red-400 shadow-[0_0_12px_rgba(248,113,113,0.75)]',
-    text: 'text-red-200',
-  },
-};
-
-const LINK_STATUS_META: Record<
-  LinkState,
-  { label: string; badge: string; stroke: string; dot: string; dashArray?: string }
-> = {
-  online: {
-    label: '在线',
-    badge: 'border-cyan-500/25 bg-cyan-500/10 text-cyan-200',
-    stroke: '#38bdf8',
-    dot: 'bg-cyan-400',
-  },
-  active: {
-    label: '活跃',
-    badge: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200',
-    stroke: '#22c55e',
-    dot: 'bg-emerald-400',
-    dashArray: '5 4',
-  },
-  alert: {
-    label: '告警',
-    badge: 'border-amber-500/25 bg-amber-500/10 text-amber-200',
-    stroke: '#f59e0b',
-    dot: 'bg-amber-400',
-    dashArray: '6 4',
-  },
-};
-
-const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
-
-const disposeMaterial = (material: THREE.Material | THREE.Material[]) => {
-  if (Array.isArray(material)) {
-    material.forEach((item) => item.dispose());
-    return;
-  }
-
-  material.dispose();
-};
-
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-const mapRange = (value: number, inputMin: number, inputMax: number, outputMin: number, outputMax: number) => {
-  if (inputMax === inputMin) {
-    return outputMin;
-  }
-
-  const ratio = (clamp(value, inputMin, inputMax) - inputMin) / (inputMax - inputMin);
-  return outputMin + (outputMax - outputMin) * ratio;
-};
-
-const modelNeedsDisplayColor = (object: THREE.Object3D) => {
-  const uniqueColors = new Set<string>();
-  let materialCount = 0;
-  let grayscaleCount = 0;
-
-  object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) {
-      return;
-    }
-
-    const materials = Array.isArray(child.material) ? child.material : [child.material];
-    materials.forEach((material) => {
-      if (!(material instanceof THREE.MeshStandardMaterial)) {
-        return;
-      }
-
-      materialCount += 1;
-      uniqueColors.add(material.color.getHexString());
-
-      const maxChannel = Math.max(material.color.r, material.color.g, material.color.b);
-      const minChannel = Math.min(material.color.r, material.color.g, material.color.b);
-      if (maxChannel - minChannel < 0.08) {
-        grayscaleCount += 1;
-      }
-    });
-  });
-
-  return materialCount > 0 && uniqueColors.size <= 3 && grayscaleCount / materialCount > 0.8;
-};
-
-const colorizeMaterial = (material: THREE.Material, colorHex: number) => {
-  const color = new THREE.Color(colorHex);
-  const cloned = material.clone();
-
-  if (cloned instanceof THREE.MeshStandardMaterial) {
-    cloned.color.lerp(color, 0.82);
-    cloned.emissive.copy(color).multiplyScalar(0.035);
-    cloned.metalness = Math.min(cloned.metalness, 0.16);
-    cloned.roughness = Math.max(cloned.roughness, 0.62);
-    return cloned;
-  }
-
-  return new THREE.MeshStandardMaterial({
-    color,
-    emissive: color.clone().multiplyScalar(0.035),
-    metalness: 0.1,
-    roughness: 0.7,
-  });
-};
-
-const applyDirectoryDisplayColors = (object: THREE.Object3D) => {
-  const globalBounds = new THREE.Box3().setFromObject(object);
-  const globalSize = globalBounds.getSize(new THREE.Vector3());
-  const globalCenter = globalBounds.getCenter(new THREE.Vector3());
-  const meshes: Array<{ mesh: THREE.Mesh; center: THREE.Vector3; size: THREE.Vector3 }> = [];
-
-  object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) {
-      return;
-    }
-
-    const meshBounds = new THREE.Box3().setFromObject(child);
-    meshes.push({
-      mesh: child,
-      center: meshBounds.getCenter(new THREE.Vector3()),
-      size: meshBounds.getSize(new THREE.Vector3()),
-    });
-  });
-
-  meshes.sort(
-    (left, right) => left.center.x - right.center.x || left.center.z - right.center.z || right.size.y - left.size.y,
-  );
-
-  meshes.forEach(({ mesh, center, size }, index) => {
-    const isTall = size.y > globalSize.y * 0.42;
-    const isLowerDeck = center.y < globalBounds.min.y + globalSize.y * 0.3;
-    const isRightSide = center.x > globalCenter.x;
-    const isFarSide = center.z > globalCenter.z;
-
-    let colorHex = DIRECTORY_DISPLAY_PALETTE[index % DIRECTORY_DISPLAY_PALETTE.length];
-    if (isTall) {
-      colorHex = isFarSide ? 0x16a34a : 0x22c55e;
-    } else if (isLowerDeck) {
-      colorHex = isRightSide ? 0x334155 : 0x475569;
-    } else if (isRightSide) {
-      colorHex = 0xf59e0b;
-    } else {
-      colorHex = 0x38bdf8;
-    }
-
-    if (Array.isArray(mesh.material)) {
-      mesh.material = mesh.material.map((material) => colorizeMaterial(material, colorHex));
-      return;
-    }
-
-    mesh.material = colorizeMaterial(mesh.material, colorHex);
-  });
-};
-
-const normalizeModel = (object: THREE.Object3D, targetMaxSize: number) => {
-  const bounds = new THREE.Box3().setFromObject(object);
-  const size = bounds.getSize(new THREE.Vector3());
-  const maxDimension = Math.max(size.x, size.y, size.z, 1);
-  const scale = targetMaxSize / maxDimension;
-
-  object.scale.setScalar(scale);
-  object.position.set(
-    -((bounds.min.x + bounds.max.x) * scale) / 2,
-    -(bounds.min.y * scale),
-    -((bounds.min.z + bounds.max.z) * scale) / 2,
-  );
-
-  return new THREE.Box3().setFromObject(object);
-};
-
-const fitCameraToObject = (
-  camera: THREE.PerspectiveCamera,
-  object: THREE.Object3D,
-  aspect: number,
-  controls?: OrbitControls,
-) => {
-  const bounds = new THREE.Box3().setFromObject(object);
-  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
-  const radius = Math.max(sphere.radius, 1);
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = (radius / Math.sin(fov / 2)) * 1.1;
-
-  camera.aspect = aspect;
-  camera.near = Math.max(0.1, distance / 100);
-  camera.far = distance * 12;
-  camera.position.set(
-    sphere.center.x + distance * 0.85,
-    sphere.center.y + radius * 0.55,
-    sphere.center.z + distance * 0.9,
-  );
-  if (controls) {
-    controls.target.copy(sphere.center);
-    controls.update();
-  } else {
-    camera.lookAt(sphere.center.x, sphere.center.y, sphere.center.z);
-  }
-  camera.updateProjectionMatrix();
-};
+import {
+  AXIS_RANGE,
+  DETAIL_PANEL_DATA,
+  MAX_LOGS,
+  NODE_TONE_META,
+  SENSOR_CONFIG,
+  createSensorSnapshot,
+  formatSensorValue,
+  getTimestamp,
+  mapRange,
+  type AxisKey,
+  type AxisPosition,
+  type CameraDeviceState,
+  type CameraKey,
+  type DetailPanelKey,
+  type LinkKey,
+  type LinkStatusMap,
+  type LogEntry,
+  type LogLevel,
+  type MacroPosition,
+  type MotorDeviceState,
+  type MotorKey,
+  type NodeTone,
+  type SensorDeviceState,
+  type SensorKey,
+  type ViewMode,
+} from './dashboardData';
+import { mountDashboardScene } from './dashboardScene';
 
 const App = () => {
-  const [systemMode, setSystemMode] = useState<SystemMode>('AUTO');
-  const [sysLog, setSysLog] = useState<SysLogEntry[]>(INITIAL_LOGS);
-  const [envData, setEnvData] = useState<EnvDataState>({ temp: 24.5, humidity: 62, light: 850 });
-  const [armPos, setArmPos] = useState<ArmPosition>({ x: 0, y: 0, z: 0 });
-  const [rackState, setRackState] = useState<RackSlot[]>(INITIAL_RACK_STATE);
+  const [viewMode, setViewMode] = useState<ViewMode>('virtual');
+  const [modelState, setModelState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [detailPanel, setDetailPanel] = useState<DetailPanelKey | null>(null);
+  const [sensorValues, setSensorValues] = useState(() => createSensorSnapshot());
+  const [axis, setAxis] = useState<AxisPosition>({ x: 0, y: 0, z: 0 });
+  const [cylinder, setCylinder] = useState(false);
+  const [links, setLinks] = useState<LinkStatusMap>({ sensors: true, motors: true, camera: false });
+  const [sensors, setSensors] = useState<SensorDeviceState>({
+    temp: true,
+    hum: true,
+    co2: true,
+    light: true,
+    ec: true,
+    ph: true,
+  });
+  const [motors, setMotors] = useState<MotorDeviceState>({ x: true, y: true, z: true, cyl: true });
+  const [cameras, setCameras] = useState<CameraDeviceState>({ cam1: false });
+  const [logs, setLogs] = useState<LogEntry[]>([
+    { time: getTimestamp(), module: '云融核心', message: '云融孪生控制台启动完成。', type: 'success' },
+    { time: getTimestamp(), module: '模式切换', message: '当前处于虚拟仿真模式。', type: 'warn' },
+  ]);
 
-  const isConnected = true;
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const twinRef = useRef<TwinObjects | null>(null);
-  const motionTargetRef = useRef<ArmPosition>({ x: 0, y: 0, z: 0 });
+  const axisRef = useRef(axis);
+  const cylinderRef = useRef(cylinder);
+  axisRef.current = axis;
+  cylinderRef.current = cylinder;
 
-  const addLog = (msg: string, type: LogType = 'info') => {
-    setSysLog((prev) => [{ time: new Date().toLocaleTimeString(), msg, type }, ...prev].slice(0, 6));
+  const addLog = (module: string, message: string, type: LogLevel = 'info') => {
+    setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), { time: getTimestamp(), module, message, type }]);
   };
 
-  const plcOnline = isConnected;
-  const axisBusOnline = plcOnline;
-  const cameraBusOnline = plcOnline;
-  const zExtended = armPos.z > 0.05;
-
-  const topologyNodes: TopologyNode[] = [
-    {
-      id: 'ipc',
-      label: '工控机 IPC',
-      short: 'IPC',
-      role: '上位机 / HMI',
-      x: 14,
-      y: 18,
-      status: plcOnline ? 'online' : 'offline',
-    },
-    {
-      id: 'plc',
-      label: 'PLC 控制器',
-      short: 'PLC',
-      role: '运动控制主站',
-      x: 44,
-      y: 40,
-      status: plcOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'offline',
-    },
-    {
-      id: 'xAxis',
-      label: 'X 轴伺服',
-      short: 'X',
-      role: `${(armPos.x * 300).toFixed(0)} mm`,
-      x: 82,
-      y: 16,
-      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.x > 0 ? 'active' : 'standby') : 'offline',
-    },
-    {
-      id: 'yAxis',
-      label: 'Y 轴伺服',
-      short: 'Y',
-      role: `${(armPos.y * 250).toFixed(0)} mm`,
-      x: 84,
-      y: 42,
-      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.y > 0 ? 'active' : 'standby') : 'offline',
-    },
-    {
-      id: 'zAxis',
-      label: 'Z 轴执行端',
-      short: 'Z',
-      role: armPos.z === 1 ? '伸出取苗' : '原点待机',
-      x: 80,
-      y: 72,
-      status: axisBusOnline ? (armPos.z === 1 ? 'active' : 'standby') : 'offline',
-    },
-    {
-      id: 'camera',
-      label: '视觉相机',
-      short: 'CAM',
-      role: systemMode === 'SCANNING' ? '图像采集中' : '待触发',
-      x: 18,
-      y: 74,
-      status: cameraBusOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'offline',
-    },
-  ];
-
-  const topologyLinks: TopologyLink[] = [
-    {
-      id: 'ipc-plc',
-      from: 'ipc',
-      to: 'plc',
-      label: '电脑 <-> PLC',
-      detail: plcOnline ? '工业以太网已建立，HMI 通讯稳定。' : '上位机与 PLC 链路中断。',
-      status: plcOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'alert',
-    },
-    {
-      id: 'plc-x',
-      from: 'plc',
-      to: 'xAxis',
-      label: 'PLC <-> X 轴',
-      detail: axisBusOnline
-        ? `伺服在线，当前位置 ${(armPos.x * 300).toFixed(0)} mm。`
-        : 'X 轴伺服离线。',
-      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.x > 0 ? 'active' : 'online') : 'alert',
-    },
-    {
-      id: 'plc-y',
-      from: 'plc',
-      to: 'yAxis',
-      label: 'PLC <-> Y 轴',
-      detail: axisBusOnline
-        ? `伺服在线，当前位置 ${(armPos.y * 250).toFixed(0)} mm。`
-        : 'Y 轴伺服离线。',
-      status: axisBusOnline ? (systemMode === 'SCANNING' || armPos.y > 0 ? 'active' : 'online') : 'alert',
-    },
-    {
-      id: 'plc-z',
-      from: 'plc',
-      to: 'zAxis',
-      label: 'PLC <-> Z 轴',
-      detail: axisBusOnline ? (armPos.z === 1 ? '抓取执行中，伸缩机构已动作。' : 'Z 轴回零待机。') : 'Z 轴执行端离线。',
-      status: axisBusOnline ? (armPos.z === 1 ? 'active' : 'online') : 'alert',
-    },
-    {
-      id: 'plc-camera',
-      from: 'plc',
-      to: 'camera',
-      label: 'PLC <-> 视觉相机',
-      detail: cameraBusOnline ? (systemMode === 'SCANNING' ? '触发采集中，图像回传正常。' : '触发链路待机。') : '视觉触发链路异常。',
-      status: cameraBusOnline ? (systemMode === 'SCANNING' ? 'active' : 'online') : 'alert',
-    },
-  ];
-
-  const topologyHealthTone: Tone =
-    topologyLinks.some((link) => link.status === 'alert')
-      ? 'alert'
-      : topologyLinks.some((link) => link.status === 'active')
-        ? 'active'
-        : 'online';
-
-  const onlineLinkCount = topologyLinks.filter((link) => link.status !== 'alert').length;
-  const activeLinkCount = topologyLinks.filter((link) => link.status === 'active').length;
-  const alertLinkCount = topologyLinks.filter((link) => link.status === 'alert').length;
-
   useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) {
-      return;
-    }
-
-    let width = mount.clientWidth;
-    let height = mount.clientHeight;
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x020617);
-    scene.fog = new THREE.FogExp2(0x020617, 0.012);
-
-    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 1000);
-    camera.position.set(18, 10, 18);
-    camera.lookAt(0, 3, 0);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(width, height);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-    renderer.domElement.style.touchAction = 'none';
-    mount.appendChild(renderer.domElement);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.enablePan = false;
-    controls.rotateSpeed = 0.72;
-    controls.zoomSpeed = 0.85;
-    controls.minDistance = 10;
-    controls.maxDistance = 38;
-    controls.minPolarAngle = Math.PI * 0.18;
-    controls.maxPolarAngle = Math.PI * 0.48;
-
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
-    scene.add(ambientLight);
-
-    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x020617, 1.15);
-    scene.add(hemiLight);
-
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
-    keyLight.position.set(14, 18, 14);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(2048, 2048);
-    scene.add(keyLight);
-
-    const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.2);
-    rimLight.position.set(-16, 8, -12);
-    scene.add(rimLight);
-
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(18, 80),
-      new THREE.MeshStandardMaterial({
-        color: 0x0f172a,
-        metalness: 0.08,
-        roughness: 0.92,
-      }),
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -0.02;
-    floor.receiveShadow = true;
-    scene.add(floor);
-
-    const haloMat = new THREE.MeshBasicMaterial({
-      color: 0x22d3ee,
-      transparent: true,
-      opacity: 0.12,
-      side: THREE.DoubleSide,
-    });
-    const halo = new THREE.Mesh(new THREE.RingGeometry(8.5, 13.5, 64), haloMat);
-    halo.rotation.x = -Math.PI / 2;
-    halo.position.y = 0.03;
-    scene.add(halo);
-
-    const modelPivot = new THREE.Group();
-    scene.add(modelPivot);
-
-    const xCarriage = new THREE.Group();
-    const yCarriage = new THREE.Group();
-    const zEffector = new THREE.Group();
-    modelPivot.add(xCarriage);
-    xCarriage.add(yCarriage);
-    yCarriage.add(zEffector);
-
-    const effectorBodyMat = new THREE.MeshStandardMaterial({
-      color: 0x67e8f9,
-      emissive: 0x67e8f9,
-      emissiveIntensity: 0.72,
-      metalness: 0.16,
-      roughness: 0.28,
-    });
-    const effectorShellMat = new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      metalness: 0.22,
-      roughness: 0.36,
-    });
-    const effectorPlate = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.16, 1.1), effectorShellMat);
-    effectorPlate.position.y = 0.24;
-    zEffector.add(effectorPlate);
-
-    const effectorBody = new THREE.Mesh(new THREE.SphereGeometry(0.28, 24, 24), effectorBodyMat);
-    zEffector.add(effectorBody);
-
-    const effectorRing = new THREE.Mesh(
-      new THREE.TorusGeometry(0.48, 0.045, 12, 36),
-      new THREE.MeshBasicMaterial({
-        color: 0x22d3ee,
-        transparent: true,
-        opacity: 0.68,
-      }),
-    );
-    effectorRing.rotation.x = Math.PI / 2;
-    zEffector.add(effectorRing);
-
-    const downLink = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.8, 18), effectorShellMat);
-    downLink.position.y = -0.9;
-    zEffector.add(downLink);
-
-    const scanConeMat = new THREE.MeshBasicMaterial({
-      color: 0x67e8f9,
-      transparent: true,
-      opacity: 0.14,
-      side: THREE.DoubleSide,
-    });
-    const scanCone = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.8, 32, 1, true), scanConeMat);
-    scanCone.rotation.z = Math.PI;
-    scanCone.position.set(0, -2.15, 0);
-    scanCone.visible = false;
-    zEffector.add(scanCone);
-
-    const twinObjects: TwinObjects = {
-      xCarriage,
-      yCarriage,
-      zEffector,
-      scanCone,
-      motionBounds: null,
-    };
-    twinRef.current = twinObjects;
-
-    let reqId = 0;
-    let disposed = false;
-    let modelReady = false;
-    let framedObject: THREE.Object3D | null = null;
-    const loader = new GLTFLoader();
-    loader.load(
-      DIRECTORY_MODEL_URL,
-      (gltf) => {
-        if (disposed) {
-          return;
-        }
-
-        const layout = gltf.scene;
-        layout.rotation.y = Math.PI * 0.75;
-
-        layout.traverse((child) => {
-          if (!(child instanceof THREE.Mesh)) {
-            return;
-          }
-
-          child.castShadow = true;
-          child.receiveShadow = true;
-
-          if (!child.geometry.getAttribute('normal')) {
-            child.geometry.computeVertexNormals();
-          }
-
-          if (Array.isArray(child.material)) {
-            child.material.forEach((material) => {
-              if (material instanceof THREE.MeshStandardMaterial) {
-                material.metalness = Math.min(material.metalness, 0.12);
-                material.roughness = Math.max(material.roughness, 0.68);
-              }
-            });
-            return;
-          }
-
-          if (child.material instanceof THREE.MeshStandardMaterial) {
-            child.material.metalness = Math.min(child.material.metalness, 0.12);
-            child.material.roughness = Math.max(child.material.roughness, 0.68);
-          }
-        });
-
-        if (modelNeedsDisplayColor(layout)) {
-          applyDirectoryDisplayColors(layout);
-        }
-
-        modelPivot.add(layout);
-        const normalizedBounds = normalizeModel(layout, 18);
-        const topGuideY = normalizedBounds.max.y + 2.6;
-        const workHeight = normalizedBounds.max.y + 0.75;
-        const motionBounds: MotionBounds = {
-          minX: normalizedBounds.min.x + 1.4,
-          maxX: normalizedBounds.max.x - 1.4,
-          minDepth: normalizedBounds.min.z + 1.1,
-          maxDepth: normalizedBounds.max.z - 1.1,
-          minHeight: workHeight - topGuideY,
-          maxHeight: 0,
-        };
-
-        xCarriage.position.y = topGuideY;
-        twinObjects.motionBounds = motionBounds;
-
-        const xRailMat = new THREE.LineBasicMaterial({
-          color: 0x38bdf8,
-          transparent: true,
-          opacity: 0.35,
-        });
-        const yRailMat = new THREE.LineBasicMaterial({
-          color: 0x22d3ee,
-          transparent: true,
-          opacity: 0.32,
-        });
-
-        const xRail = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(motionBounds.minX, topGuideY, 0),
-            new THREE.Vector3(motionBounds.maxX, topGuideY, 0),
-          ]),
-          xRailMat,
-        );
-        modelPivot.add(xRail);
-
-        const yRail = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(0, 0, motionBounds.minDepth),
-            new THREE.Vector3(0, 0, motionBounds.maxDepth),
-          ]),
-          yRailMat,
-        );
-        xCarriage.add(yRail);
-
-        xCarriage.position.x = mapRange(motionTargetRef.current.x, 0, AXIS_LIMITS.x, motionBounds.minX, motionBounds.maxX);
-        yCarriage.position.z = mapRange(
-          motionTargetRef.current.y,
-          0,
-          AXIS_LIMITS.y,
-          motionBounds.minDepth,
-          motionBounds.maxDepth,
-        );
-        zEffector.position.y = mapRange(
-          motionTargetRef.current.z,
-          0,
-          AXIS_LIMITS.z,
-          motionBounds.maxHeight,
-          motionBounds.minHeight,
-        );
-
-        framedObject = layout;
-        fitCameraToObject(camera, layout, width / height, controls);
-        modelReady = true;
-      },
-      undefined,
-      (error) => {
-        console.error('Failed to load directory layout model.', error);
-      },
-    );
-
-    const animate = () => {
-      reqId = window.requestAnimationFrame(animate);
-      const elapsed = performance.now() * 0.001;
-      haloMat.opacity = 0.11 + Math.sin(elapsed * 1.4) * 0.02;
-      scanConeMat.opacity = scanCone.visible ? 0.2 + Math.sin(elapsed * 6) * 0.05 : 0.14;
-      effectorBodyMat.emissiveIntensity = scanCone.visible ? 0.95 : 0.72;
-      effectorRing.scale.setScalar(scanCone.visible ? 1 + Math.sin(elapsed * 6) * 0.03 : 1);
-
-      if (modelReady && twinObjects.motionBounds) {
-        const targetX = mapRange(
-          motionTargetRef.current.x,
-          0,
-          AXIS_LIMITS.x,
-          twinObjects.motionBounds.minX,
-          twinObjects.motionBounds.maxX,
-        );
-        const targetDepth = mapRange(
-          motionTargetRef.current.y,
-          0,
-          AXIS_LIMITS.y,
-          twinObjects.motionBounds.minDepth,
-          twinObjects.motionBounds.maxDepth,
-        );
-        const targetHeight = mapRange(
-          motionTargetRef.current.z,
-          0,
-          AXIS_LIMITS.z,
-          twinObjects.motionBounds.maxHeight,
-          twinObjects.motionBounds.minHeight,
-        );
-
-        xCarriage.position.x += (targetX - xCarriage.position.x) * 0.08;
-        yCarriage.position.z += (targetDepth - yCarriage.position.z) * 0.08;
-        zEffector.position.y += (targetHeight - zEffector.position.y) * 0.12;
-      }
-
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
-
-    const handleResize = () => {
-      width = mount.clientWidth;
-      height = mount.clientHeight;
-      renderer.setSize(width, height);
-      if (modelReady && framedObject) {
-        fitCameraToObject(camera, framedObject, width / height, controls);
-        return;
-      }
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      window.cancelAnimationFrame(reqId);
-      disposed = true;
-      twinRef.current = null;
-      controls.dispose();
-
-      if (mount.contains(renderer.domElement)) {
-        mount.removeChild(renderer.domElement);
-      }
-
-      scene.traverse((object: THREE.Object3D) => {
-        if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
-          object.geometry.dispose();
-          disposeMaterial(object.material);
-        }
-      });
-
-      renderer.dispose();
-    };
-  }, []);
-
-  useEffect(() => {
-    motionTargetRef.current = armPos;
-  }, [armPos]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setEnvData((prev) => ({
-        temp: prev.temp + (Math.random() * 0.4 - 0.2),
-        humidity: prev.humidity + (Math.random() - 0.5),
-        light: prev.light + (Math.random() * 10 - 5),
-      }));
-    }, 2000);
-
+    const timer = window.setInterval(() => setSensorValues(createSensorSnapshot()), 2000);
     return () => window.clearInterval(timer);
   }, []);
 
-  const sendCmdToPython = (cmd: string, payload: Record<string, unknown>) => {
-    console.log(`[Python Interface] Executing: ${cmd}`, payload);
+  useEffect(() => {
+    if (!mountRef.current) {
+      return;
+    }
+    return mountDashboardScene({
+      mount: mountRef.current,
+      axisRef,
+      cylinderRef,
+      onModelState: setModelState,
+    });
+  }, []);
+
+  const canX = links.motors && motors.x;
+  const canY = links.motors && motors.y;
+  const canZ = links.motors && motors.z;
+  const canCylinder = links.motors && motors.cyl;
+  const cameraOnline = links.camera && cameras.cam1;
+
+  const hostTone: NodeTone = viewMode === 'virtual' ? 'virtual' : 'online';
+  const linkLabelMap: Record<LinkKey, string> = {
+    sensors: '传感器总线',
+    motors: '伺服/气动总线',
+    camera: '视觉相机总线',
+  };
+  const macroLabelMap: Record<Exclude<MacroPosition, 'home'>, string> = {
+    bottom: '底层巡检',
+    middle: '中层巡检',
+    top: '顶层巡检',
+  };
+  const busTone = {
+    sensors: links.sensors ? hostTone : 'offline',
+    motors: links.motors ? hostTone : 'offline',
+    camera: links.camera ? hostTone : 'offline',
+  } as const;
+
+  const toggleMode = (mode: ViewMode) => {
+    if (mode === viewMode) {
+      return;
+    }
+    setViewMode(mode);
+    setDetailPanel(null);
+    addLog(
+      mode === 'virtual' ? '模式切换' : '网络层',
+      mode === 'virtual' ? '已切换至虚拟仿真模式，可编辑拓扑连线。' : '已切换至远程监控模式，正在等待 PLC 链路握手。',
+      mode === 'virtual' ? 'warn' : 'success',
+    );
   };
 
-  const setManualAxis = (axis: keyof ArmPosition, value: number) => {
-    if (systemMode === 'SCANNING') {
+  const toggleLink = (key: LinkKey) => {
+    if (viewMode !== 'virtual') {
+      return;
+    }
+    setLinks((prev) => {
+      const next = !prev[key];
+      addLog('网络拓扑', `${next ? '已接通' : '已断开'}${linkLabelMap[key]}。`, next ? 'info' : 'error');
+      return { ...prev, [key]: next };
+    });
+  };
+
+  const toggleDevice = (panel: DetailPanelKey, id: string) => {
+    if (viewMode !== 'virtual') {
       return;
     }
 
-    const axisMax = AXIS_LIMITS[axis];
-    const nextValue = clamp(value, 0, axisMax);
+    if (panel === 'sensors') {
+      setSensors((prev) => ({ ...prev, [id as SensorKey]: !prev[id as SensorKey] }));
+    } else if (panel === 'motors') {
+      setMotors((prev) => ({ ...prev, [id as MotorKey]: !prev[id as MotorKey] }));
+    } else {
+      setCameras((prev) => ({ ...prev, [id as CameraKey]: !prev[id as CameraKey] }));
+    }
 
-    setSystemMode('MANUAL');
-    setArmPos((prev) => ({ ...prev, [axis]: nextValue }));
+    addLog('设备管理', `已切换设备 [${id.toUpperCase()}] 的连接状态。`, 'info');
   };
 
-  const handleResumeAuto = () => {
-    if (systemMode === 'SCANNING') {
+  const moveAxis = (key: AxisKey, value: number) => {
+    if ((key === 'x' && !canX) || (key === 'y' && !canY) || (key === 'z' && !canZ)) {
+      return;
+    }
+    setAxis((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const moveMacro = (target: MacroPosition) => {
+    if (!canX || !canY) {
+      addLog('运动控制', '宏指令执行失败，存在离线轴未满足联动条件。', 'error');
       return;
     }
 
-    setSystemMode('AUTO');
-    addLog('已恢复自动待机，保留当前位姿。', 'info');
-    /*
-    addLog('宸叉仮澶嶈嚜鍔ㄥ緟鏈猴紝褰撳墠浣嶇疆宸蹭繚鐣欍€?, 'info');
-    */
-  };
-
-  const handleSmartPick = async () => {
-    if (systemMode === 'SCANNING') {
+    if (target === 'home') {
+      setAxis({ x: 0, y: 0, z: 0 });
+      setCylinder(false);
+      addLog('运动控制', '执行一键回零流程。', 'warn');
       return;
     }
 
-    setSystemMode('SCANNING');
-    addLog('开始 AI 智能巡检，进入视觉扫描流程。', 'info');
-
-    const path: Array<Pick<ArmPosition, 'x' | 'y'>> = [
-      { x: 0, y: 2 },
-      { x: 1, y: 2 },
-      { x: 2, y: 2 },
-      { x: 2, y: 1 },
-      { x: 1, y: 1 },
-      { x: 0, y: 1 },
-      { x: 0, y: 0 },
-      { x: 1, y: 0 },
-      { x: 2, y: 0 },
-    ];
-
-    const twin = twinRef.current;
-    if (twin) {
-      twin.scanCone.visible = true;
-    }
-
-    for (const pos of path) {
-      setArmPos({ x: pos.x, y: pos.y, z: 0 });
-      sendCmdToPython('MOVE_XY', { x: pos.x, y: pos.y });
-
-      await sleep(1000);
-
-      const currentSlot = rackState.find((slot) => slot.x === pos.x && slot.y === pos.y);
-      if (!currentSlot) {
-        addLog(`未找到仓位坐标 [${pos.x}, ${pos.y}]。`, 'error');
-        continue;
-      }
-
-      if (currentSlot.status === 2) {
-        addLog(`识别成功: [${currentSlot.id}] 为成熟幼苗，执行抓取。`, 'success');
-        sendCmdToPython('AI_DETECT_RESULT', { id: currentSlot.id, result: 'MATURE' });
-
-        setArmPos({ x: pos.x, y: pos.y, z: 1 });
-        sendCmdToPython('MOVE_Z', { action: 'EXTEND' });
-        await sleep(800);
-
-        setRackState((prev) =>
-          prev.map((slot) => (slot.id === currentSlot.id ? { ...slot, status: 0 } : slot)),
-        );
-
-        setArmPos({ x: pos.x, y: pos.y, z: 0 });
-        sendCmdToPython('MOVE_Z', { action: 'RETRACT' });
-        await sleep(800);
-
-        addLog('正在搬运至一楼出库口。', 'info');
-        setArmPos({ x: 0, y: 0, z: 0 });
-        sendCmdToPython('MOVE_XY', { x: 0, y: 0 });
-        await sleep(1500);
-
-        addLog(`[${currentSlot.id}] 幼苗出库完成。`, 'success');
-
-        if (twin) {
-          twin.scanCone.visible = false;
-        }
-        setSystemMode('AUTO');
-        return;
-      }
-
-      if (currentSlot.status === 3) {
-        addLog(`告警: [${currentSlot.id}] 发现异常病苗或缺水状态。`, 'error');
-      }
-    }
-
-    addLog('巡检完毕，未发现可出库幼苗。', 'info');
-    if (twin) {
-      twin.scanCone.visible = false;
-    }
-    setSystemMode('AUTO');
+    const y = target === 'bottom' ? 25 : target === 'middle' ? 75 : 130;
+    setAxis((prev) => ({ ...prev, x: 0, y }));
+    addLog('运动控制', `执行预设动作：${macroLabelMap[target as Exclude<MacroPosition, 'home'>]}。`, 'info');
   };
 
-  const handleReset = () => {
-    setSystemMode('AUTO');
-    setArmPos({ x: 0, y: 0, z: 0 });
-    addLog('伺服电机回零 (Home)。', 'info');
-    sendCmdToPython('HOME', {});
-  };
+  const syncClass =
+    viewMode === 'virtual'
+      ? 'border-amber-500/30 bg-amber-500/12 text-amber-200'
+      : 'border-emerald-500/30 bg-emerald-500/12 text-emerald-200';
 
-  const nodeLookup = {} as Record<NodeId, TopologyNode>;
-  for (const node of topologyNodes) {
-    nodeLookup[node.id] = node;
-  }
+  const modelClass =
+    modelState === 'loading'
+      ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200'
+      : modelState === 'ready'
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+        : 'border-rose-500/30 bg-rose-500/10 text-rose-200';
+
+  const getDeviceOnline = (panel: DetailPanelKey, id: string) => {
+    if (panel === 'sensors') {
+      return links.sensors && sensors[id as SensorKey];
+    }
+    if (panel === 'motors') {
+      return links.motors && motors[id as MotorKey];
+    }
+    return links.camera && cameras[id as CameraKey];
+  };
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-950 text-slate-200">
-      <header className="relative z-10 flex h-16 shrink-0 items-center justify-between border-b border-slate-800 bg-slate-900/80 px-6 backdrop-blur">
-        <div className="flex items-center gap-3">
-          <div className="rounded-lg border border-blue-500/30 bg-blue-600/20 p-2">
-            <ShieldCheck className="h-6 w-6 text-blue-400" />
+    <div className="relative min-h-screen overflow-hidden bg-[#06101b] text-slate-200">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.16),_transparent_34%),radial-gradient(circle_at_bottom_right,_rgba(34,197,94,0.12),_transparent_24%),linear-gradient(180deg,_#081221_0%,_#050b14_100%)]" />
+
+      <header className="relative z-10 flex items-center justify-between border-b border-slate-800/80 bg-slate-950/72 px-4 py-3 backdrop-blur md:px-6">
+        <div className="flex items-center gap-4">
+          <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-2.5">
+            <Network className="h-6 w-6 text-cyan-300" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-wider text-white">智慧农业 3D 数字孪生控制台</h1>
-            <p className="font-mono text-xs text-slate-400">ID: JSG2026-AGRI-01 | Python 网关在线</p>
+            <h1 className="bg-gradient-to-r from-cyan-300 via-sky-200 to-blue-400 bg-clip-text text-lg font-bold tracking-[0.28em] text-transparent md:text-2xl">
+              云融孪生控制系统
+            </h1>
+            <p className="mt-1 text-xs text-slate-400 md:text-sm">需求 2.0 页面方案，装配模型已替换接入</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-8">
-          <div className="flex gap-4">
-            <EnvData icon={<Thermometer className="h-4 w-4 text-orange-500" />} val={`${envData.temp.toFixed(1)}°C`} />
-            <EnvData icon={<Droplets className="h-4 w-4 text-blue-500" />} val={`${envData.humidity.toFixed(1)}%`} />
-            <EnvData icon={<Sun className="h-4 w-4 text-yellow-500" />} val={`${Math.round(envData.light)} Lx`} />
-          </div>
-          <div className="h-8 w-px bg-slate-700"></div>
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-3 w-3">
-              {plcOnline && (
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
-              )}
-              <span
-                className={`relative inline-flex h-3 w-3 rounded-full ${plcOnline ? 'bg-green-500' : 'bg-red-500'}`}
-              ></span>
-            </span>
-            <span className="text-sm font-bold text-slate-300">工控网络</span>
-          </div>
+        <div className="flex gap-3 rounded-xl border border-slate-700 bg-slate-900/88 p-1.5 shadow-inner">
+          <button
+            onClick={() => toggleMode('virtual')}
+            className={classNames('flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors', viewMode === 'virtual' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white')}
+          >
+            <Monitor className="h-4 w-4" />
+            虚拟仿真模式
+          </button>
+          <button
+            onClick={() => toggleMode('remote')}
+            className={classNames('flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors', viewMode === 'remote' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white')}
+          >
+            <Radar className="h-4 w-4" />
+            远程监控模式
+          </button>
         </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1">
-        <div className="absolute bottom-6 left-6 top-6 z-10 flex w-80 max-w-[calc(100%-3rem)] flex-col gap-4">
-          <div className="rounded-xl border border-slate-700/50 bg-slate-900/80 p-5 shadow-2xl backdrop-blur-md">
-            <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-400">
-              <Activity className="h-4 w-4" /> 制造执行系统 (MES)
-            </h2>
-
-            <div className="space-y-3">
-              <button
-                onClick={handleSmartPick}
-                disabled={systemMode === 'SCANNING'}
-                className="flex w-full items-center justify-center gap-2 overflow-hidden rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 py-3 text-sm font-bold text-white shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50"
-              >
-                {systemMode === 'SCANNING' ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Search className="h-4 w-4" />
-                )}
-                {systemMode === 'SCANNING' ? 'AI 视觉巡检中...' : '一键 AI 巡检与出库'}
-              </button>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={handleReset}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-700"
-                >
-                  <RefreshCw className="h-4 w-4" /> 原点复位
-                </button>
-                <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-800/50 bg-red-900/30 py-2 text-sm text-red-400 transition-colors hover:bg-red-900/50">
-                  <Power className="h-4 w-4" /> 硬件急停
-                </button>
+      <main className="relative z-10 h-[calc(100vh-4rem)] p-3 md:p-4">
+        <div className="grid h-full min-h-0 gap-3 xl:grid-cols-[19rem_minmax(0,1fr)_21rem]">
+          <section className="flex min-h-[24rem] flex-col gap-3 xl:min-h-0">
+            <div className="glass-panel flex min-h-0 flex-[0_0_45%] flex-col">
+              <Header title="综合微环境监测阵列" icon={<Thermometer className="h-4 w-4 text-cyan-300" />} />
+              <div className="grid flex-1 grid-cols-2 gap-2 overflow-y-auto p-3 custom-scrollbar">
+                {SENSOR_CONFIG.map((item) => {
+                  const online = links.sensors && sensors[item.id];
+                  return (
+                    <div key={item.id} className="rounded-xl border border-slate-700 bg-slate-900/82 p-3">
+                      <div className="mb-2 flex items-start justify-between">
+                        <div className="text-xs text-slate-400">{item.label}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/90 p-1.5">
+                          <item.Icon className={classNames('h-3.5 w-3.5', online ? item.accentClass : 'text-slate-500')} />
+                        </div>
+                      </div>
+                      <div className={classNames('lcd-text text-2xl font-semibold', online ? item.accentClass : 'text-slate-500')}>
+                        {online ? formatSensorValue(sensorValues[item.id], item.precision) : '--'}
+                        <span className="ml-1 text-xs text-slate-500">{item.unit}</span>
+                      </div>
+                      <div className="mt-3 h-1.5 rounded-full bg-slate-800">
+                        <div
+                          className={classNames('h-full rounded-full transition-[width] duration-500', online ? item.barClass : 'bg-slate-600')}
+                          style={{ width: `${online ? Math.round(mapRange(sensorValues[item.id], item.min, item.max, 16, 100)) : 12}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="mt-4 border-t border-slate-700/50 pt-4">
-              <div className="mb-2 flex justify-between text-xs text-slate-400">
-                <span>三轴伺服坐标反馈 (mm)</span>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-center font-mono">
-                <div className="rounded border border-slate-800 bg-slate-950 p-2">
-                  <span className="block text-[10px] text-slate-500">X-Axis</span>
-                  <span className="text-blue-400">{(armPos.x * 300).toFixed(0)}</span>
+            <div className="glass-panel flex min-h-0 flex-[0_0_55%] flex-col">
+              <Header
+                title="执行机构运动监控"
+                icon={<SlidersHorizontal className="h-4 w-4 text-emerald-300" />}
+                accent="border-l-emerald-500"
+                extra={<div className="text-[10px] text-slate-400">使能 / 仿真 / 离线</div>}
+              />
+              <div className="custom-scrollbar flex flex-1 flex-col gap-2 overflow-y-auto p-3">
+                <div className="grid grid-cols-3 gap-2 rounded-xl border border-slate-800/80 bg-slate-950/65 p-2">
+                  {(['x', 'y', 'z'] as AxisKey[]).map((key) => (
+                    <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/90 p-2 text-center">
+                      <div className="text-[10px] text-slate-500">{key.toUpperCase()}</div>
+                      <div className={classNames('mt-1 font-mono text-sm font-semibold', key === 'x' ? 'text-rose-300' : key === 'y' ? 'text-emerald-300' : 'text-cyan-300')}>
+                        {axis[key].toFixed(1)} mm
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="rounded border border-slate-800 bg-slate-950 p-2">
-                  <span className="block text-[10px] text-slate-500">Y-Axis</span>
-                  <span className="text-blue-400">{(armPos.y * 250).toFixed(0)}</span>
-                </div>
-                <div className="rounded border border-slate-800 bg-slate-950 p-2">
-                  <span className="block text-[10px] text-slate-500">Z-Axis</span>
-                  <span className={zExtended ? 'text-green-400' : 'text-slate-400'}>
-                    {(armPos.z * Z_TRAVEL_MM).toFixed(0)}
-                  </span>
-                </div>
-              </div>
 
-              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold tracking-[0.18em] text-slate-500">XYZ MANUAL</span>
+                {(['x', 'y', 'z'] as AxisKey[]).map((key) => (
+                  <div key={key} className="rounded-xl border border-slate-700 bg-slate-900/82 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <span className={classNames('text-xs font-semibold', key === 'x' ? 'text-rose-300' : key === 'y' ? 'text-emerald-300' : 'text-cyan-300')}>
+                        {key.toUpperCase()} 轴
+                      </span>
+                      <span className="lcd-text rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200">
+                        {axis[key].toFixed(1)} mm
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={AXIS_RANGE[key].min}
+                      max={AXIS_RANGE[key].max}
+                      step={1}
+                      value={axis[key]}
+                      disabled={(key === 'x' && !canX) || (key === 'y' && !canY) || (key === 'z' && !canZ)}
+                      onChange={(event) => moveAxis(key, Number(event.target.value))}
+                      className="w-full cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                    />
+                  </div>
+                ))}
+
+                <div className="rounded-xl border border-slate-700 bg-slate-900/80 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-yellow-300">推料气缸控制</span>
+                    <span className="lcd-text rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200">
+                      {cylinder ? '伸出' : '缩回'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      disabled={!canCylinder}
+                      onClick={() => (canCylinder ? setCylinder(false) : addLog('运动控制', '推料气缸当前离线，无法执行缩回。', 'error'))}
+                      className={classNames('rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45', !cylinder ? 'border-yellow-400/70 bg-yellow-500 text-slate-950' : 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700')}
+                    >
+                      缩回
+                    </button>
+                    <button
+                      disabled={!canCylinder}
+                      onClick={() => (canCylinder ? setCylinder(true) : addLog('运动控制', '推料气缸当前离线，无法执行伸出。', 'error'))}
+                      className={classNames('rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45', cylinder ? 'border-yellow-400/70 bg-yellow-500 text-slate-950' : 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700')}
+                    >
+                      伸出
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-auto border-t border-slate-800 pt-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['bottom', 'middle', 'top'] as const).map((preset) => (
+                      <button
+                        key={preset}
+                        disabled={!canX || !canY}
+                        onClick={() => moveMacro(preset)}
+                        className="rounded-lg border border-slate-700 bg-slate-800/90 px-3 py-2 text-xs font-semibold text-slate-200 transition-colors hover:bg-emerald-700/45 disabled:opacity-45"
+                      >
+                        {macroLabelMap[preset]}
+                      </button>
+                    ))}
+                  </div>
                   <button
-                    onClick={handleResumeAuto}
-                    disabled={systemMode === 'SCANNING'}
-                    className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/10 disabled:opacity-50"
+                    onClick={() => moveMacro('home')}
+                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-blue-500/25 bg-slate-900/75 px-3 py-2 text-xs font-semibold text-blue-300 transition-colors hover:bg-slate-800"
                   >
-                    AUTO
+                    <House className="h-4 w-4" />
+                    一键回零
                   </button>
                 </div>
-
-                <div className="space-y-3">
-                  <div>
-                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
-                      <span>X 轴</span>
-                      <span className="font-mono text-cyan-300">{(armPos.x * 300).toFixed(0)} mm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={AXIS_LIMITS.x}
-                      step={0.01}
-                      value={armPos.x}
-                      onChange={(event) => setManualAxis('x', Number(event.target.value))}
-                      disabled={systemMode === 'SCANNING'}
-                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
-                      <span>Y 轴</span>
-                      <span className="font-mono text-cyan-300">{(armPos.y * 250).toFixed(0)} mm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={AXIS_LIMITS.y}
-                      step={0.01}
-                      value={armPos.y}
-                      onChange={(event) => setManualAxis('y', Number(event.target.value))}
-                      disabled={systemMode === 'SCANNING'}
-                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
-                      <span>Z 轴</span>
-                      <span className="font-mono text-cyan-300">{(armPos.z * Z_TRAVEL_MM).toFixed(0)} mm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={AXIS_LIMITS.z}
-                      step={1}
-                      value={armPos.z}
-                      onChange={(event) => setManualAxis('z', Number(event.target.value))}
-                      disabled={systemMode === 'SCANNING'}
-                      className="h-2 w-full cursor-pointer accent-cyan-400 disabled:cursor-not-allowed"
-                    />
-                  </div>
-                </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="flex flex-1 flex-col rounded-xl border border-slate-700/50 bg-slate-900/80 p-5 shadow-2xl backdrop-blur-md">
-            <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-400">
-              <Camera className="h-4 w-4" /> 边缘节点运行日志
-            </h2>
-            <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto pr-2 font-mono text-xs">
-              {sysLog.map((log, index) => (
-                <div key={index} className="flex flex-col gap-1 border-b border-slate-800/50 pb-2">
-                  <span className="text-slate-500">[{log.time}]</span>
-                  <span
-                    className={
-                      log.type === 'success'
-                        ? 'text-green-400'
-                        : log.type === 'error'
-                          ? 'text-red-400'
-                          : 'text-blue-300'
-                    }
-                  >
-                    {log.msg}
-                  </span>
-                </div>
-              ))}
+          <section className="glass-panel relative min-h-[30rem] overflow-hidden xl:min-h-0">
+            <div className="absolute left-3 top-3 z-10 flex flex-wrap items-center gap-2">
+              <span className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-xs font-semibold text-sky-200">云融三维引擎工作区</span>
+              <span className={classNames('rounded-lg border px-3 py-1.5 text-xs font-semibold', syncClass)}>
+                {viewMode === 'virtual' ? (
+                  <span className="inline-flex items-center gap-1"><Unplug className="h-3.5 w-3.5" />虚拟仿真链路</span>
+                ) : (
+                  <span className="inline-flex items-center gap-1"><Link2 className="h-3.5 w-3.5" />PLC 远程联机</span>
+                )}
+              </span>
             </div>
-          </div>
-        </div>
+            <div className="absolute right-3 top-3 z-10">
+              <span className={classNames('rounded-lg border px-3 py-1.5 text-xs font-semibold', modelClass)}>
+                {modelState === 'loading' ? '模型加载中' : modelState === 'ready' ? '模型已就绪' : '模型加载失败'}
+              </span>
+            </div>
+            <div ref={mountRef} className="h-full w-full bg-[radial-gradient(circle_at_center,_rgba(30,41,59,0.82),_rgba(8,15,26,0.98)_70%)]" />
+            <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-950/65 px-4 py-1.5 text-xs text-slate-300">
+              左键旋转 | 右键平移 | 滚轮缩放
+            </div>
+            <div className="pointer-events-none absolute bottom-3 right-3 rounded-xl border border-slate-800 bg-slate-950/55 px-3 py-2 text-[11px] text-slate-400">
+              docs/模型/ImageToStl.com_装配.gltf
+            </div>
+          </section>
 
-        <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing"></div>
-
-        <div className="absolute right-6 top-6 z-10 w-[27rem] max-w-[calc(100%-3rem)]">
-          <div className="rounded-2xl border border-slate-700/50 bg-slate-900/82 p-5 shadow-2xl backdrop-blur-md">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-sm font-bold text-slate-200">组态网络 / 通讯拓扑</h2>
-                <p className="mt-1 text-xs leading-5 text-slate-400">
-                  展示工控机、PLC、XYZ 三轴与视觉节点的实时连接状态。
-                </p>
-              </div>
-              <StatusPill
-                tone={topologyHealthTone}
-                label={topologyHealthTone === 'alert' ? '存在告警' : topologyHealthTone === 'active' ? '通讯活跃' : '链路正常'}
+          <section className="flex min-h-[28rem] flex-col gap-3 xl:min-h-0">
+            <div className="glass-panel relative flex min-h-0 flex-[0_0_55%] flex-col">
+              <Header
+                title="工业控制网络拓扑"
+                icon={<Cpu className="h-4 w-4 text-fuchsia-300" />}
+                accent="border-l-fuchsia-500"
+                extra={viewMode === 'virtual' ? <span className="rounded-full border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200 animate-pulse">点击连线断开 / 重连</span> : null}
               />
-            </div>
+              <div className="relative flex-1 overflow-hidden bg-slate-900/45 p-3">
+                {detailPanel ? (
+                  <div className="absolute inset-2 z-20 flex flex-col rounded-xl border border-slate-600 bg-slate-950/95 p-3 shadow-2xl">
+                    <div className="mb-3 flex items-center justify-between border-b border-slate-800 pb-2">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-sky-200"><Terminal className="h-4 w-4" />{DETAIL_PANEL_DATA[detailPanel].title}</div>
+                      <button onClick={() => setDetailPanel(null)} className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800">关闭</button>
+                    </div>
+                    <div className="custom-scrollbar flex-1 space-y-2 overflow-y-auto pr-1">
+                      {DETAIL_PANEL_DATA[detailPanel].items.map((item) => {
+                        const online = getDeviceOnline(detailPanel, item.id);
+                        return (
+                          <div key={item.id} className="grid grid-cols-[auto,1fr,auto] items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/85 px-3 py-2">
+                            <div className="rounded-lg border border-slate-700 bg-slate-950/80 p-2"><item.Icon className="h-4 w-4 text-slate-300" /></div>
+                            <div>
+                              <div className="text-sm font-semibold text-slate-100">{item.name}</div>
+                              <div className="mt-1 text-[11px] text-slate-500">{item.address}</div>
+                            </div>
+                            <div className="flex flex-col items-end gap-1">
+                              <div className={classNames('inline-flex items-center gap-1 text-[11px]', online ? 'text-emerald-300' : 'text-rose-300')}>
+                                {online ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                                {online ? (viewMode === 'virtual' ? '连接中(仿真)' : '在线') : '离线'}
+                              </div>
+                              {viewMode === 'virtual' && links[detailPanel] ? (
+                                <button onClick={() => toggleDevice(detailPanel, item.id)} className={classNames('rounded-md border px-2 py-1 text-[10px] font-semibold', online ? 'border-rose-500/30 bg-rose-500/10 text-rose-200' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200')}>
+                                  {online ? '断开' : '连接'}
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
 
-            <div className="mt-4 grid grid-cols-3 gap-2">
-              <MetricCard label="在线链路" value={`${onlineLinkCount}/${topologyLinks.length}`} tone="online" />
-              <MetricCard label="活跃链路" value={`${activeLinkCount}`} tone="active" />
-              <MetricCard label="异常链路" value={`${alertLinkCount}`} tone="alert" />
-            </div>
-
-            <div className="mt-4 rounded-2xl border border-slate-800 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_rgba(2,6,23,0.15)_38%,_rgba(2,6,23,0.92)_90%)] p-4">
-              <div className="relative h-[18rem] overflow-hidden rounded-xl border border-slate-800/80 bg-slate-950/75">
-                <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
-                  {topologyLinks.map((link) => {
-                    const fromNode = nodeLookup[link.from];
-                    const toNode = nodeLookup[link.to];
-                    const meta = LINK_STATUS_META[link.status];
-                    const midX = (fromNode.x + toNode.x) / 2;
-                    const midY = (fromNode.y + toNode.y) / 2;
-
-                    return (
-                      <g key={link.id}>
-                        <line
-                          x1={fromNode.x}
-                          y1={fromNode.y}
-                          x2={toNode.x}
-                          y2={toNode.y}
-                          stroke={meta.stroke}
-                          strokeWidth={2.1}
-                          strokeOpacity={0.9}
-                          strokeDasharray={meta.dashArray}
-                          className={link.status === 'active' ? 'topology-line-active' : undefined}
-                        />
-                        <circle cx={midX} cy={midY} r={1.2} fill={meta.stroke} className={link.status === 'active' ? 'topology-pulse' : undefined} />
-                      </g>
-                    );
-                  })}
-                </svg>
-
-                {topologyNodes.map((node) => (
-                  <TopologyNodeCard key={node.id} node={node} />
-                ))}
+                <div className={classNames('relative flex h-full flex-col items-center justify-start py-2', viewMode === 'virtual' && 'virtual-edit-mode')}>
+                  <Node label="云融上位机" sub="HMI / 数据中枢" tone={hostTone} icon={<Monitor className="h-6 w-6 text-cyan-300" />} />
+                  <div className="h-3 w-[2px] bg-sky-400/70" />
+                  <Node label="S7-1200 主站" sub="运动主控 PLC" tone={hostTone} icon={<Cpu className="h-7 w-7 text-emerald-300" />} />
+                  <div className="h-4 w-[2px] bg-sky-400/70" />
+                  <div className="relative h-5 w-[85%]">
+                    <div className="absolute inset-x-0 top-0 h-[2px] bg-sky-400/70" />
+                    {(['sensors', 'motors', 'camera'] as LinkKey[]).map((key, index) => (
+                      <button
+                        key={key}
+                        onClick={() => toggleLink(key)}
+                        className={classNames(
+                          'topo-link-branch absolute top-0 h-5 w-[4px] rounded-full',
+                          index === 0 ? 'left-0' : index === 1 ? 'left-1/2 -translate-x-1/2' : 'right-0',
+                          links[key]
+                            ? 'bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.7)]'
+                            : "bg-rose-400/90 before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:border-l before:border-dashed before:border-rose-100/80 before:content-['']",
+                        )}
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-4 flex w-full justify-between gap-2 px-1">
+                    <Leaf label="传感总线" tone={busTone.sensors} icon={<Thermometer className="h-5 w-5 text-yellow-300" />} onClick={() => setDetailPanel('sensors')} />
+                    <Leaf label="伺服/气动" tone={busTone.motors} icon={<SlidersHorizontal className="h-5 w-5 text-rose-300" />} onClick={() => setDetailPanel('motors')} />
+                    <Leaf label="视觉相机" tone={busTone.camera} icon={<Camera className="h-5 w-5 text-fuchsia-300" />} onClick={() => setDetailPanel('camera')} />
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="mt-4 space-y-2">
-              {topologyLinks.map((link) => (
-                <LinkStatusRow key={link.id} link={link} />
-              ))}
-            </div>
-          </div>
-        </div>
+            <div className="glass-panel flex min-h-0 flex-[0_0_45%] flex-col">
+              <Header title="诊断日志与视觉" icon={<Terminal className="h-4 w-4 text-yellow-300" />} accent="border-l-yellow-500" />
+              <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+                <div className="relative h-32 overflow-hidden rounded-xl border border-slate-700 bg-black shadow-inner">
+                  <div className={classNames('absolute left-2 top-2 z-10 rounded px-2 py-1 text-[10px] font-semibold text-white', cameraOnline ? 'bg-emerald-600' : 'animate-pulse bg-rose-600')}>
+                    {cameraOnline ? 'CAM 01 在线' : 'CAM 01 离线'}
+                  </div>
+                  {cameraOnline ? (
+                    <>
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_25%,rgba(34,197,94,0.22),transparent_28%),linear-gradient(180deg,rgba(6,78,59,0.22),rgba(2,6,23,0.94)_78%)]" />
+                      <div className="absolute inset-x-4 bottom-4 top-10 rounded-[1.5rem] border border-emerald-300/20 bg-emerald-400/8" />
+                      <div className="camera-scan-line absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-transparent via-cyan-300/18 to-transparent" />
+                    </>
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-500">
+                      <Camera className="h-8 w-8" />
+                      <span className="text-xs">无视频流信号</span>
+                    </div>
+                  )}
+                </div>
 
-        <div className="pointer-events-none absolute bottom-6 right-6 z-10 rounded-xl border border-slate-800 bg-slate-900/60 p-4 shadow-xl backdrop-blur-md">
-          <h3 className="mb-3 text-xs font-bold uppercase text-slate-500">AI 识别状态图例</h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-sm bg-green-500 shadow-[0_0_8px_#22c55e]"></div>
-              <span className="text-slate-300">成熟期 (可采摘)</span>
+                <div className="grid grid-cols-3 gap-2">
+                  {[{ label: '模式', value: viewMode === 'virtual' ? '仿真' : '远控', tone: viewMode === 'virtual' ? 'virtual' : 'online' }, { label: '总线', value: `${Object.values(links).filter(Boolean).length}/3`, tone: links.camera ? 'online' : 'virtual' }, { label: '相机', value: cameraOnline ? '在线' : '离线', tone: cameraOnline ? 'online' : 'offline' }].map((item) => (
+                    <div key={item.label} className={classNames('rounded-xl border px-3 py-2', NODE_TONE_META[item.tone as NodeTone].panel)}>
+                      <div className="text-[10px] text-slate-500">{item.label}</div>
+                      <div className={classNames('mt-1 text-sm font-semibold', NODE_TONE_META[item.tone as NodeTone].text)}>{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/80 p-3 font-mono text-[11px]">
+                  {logs.map((log, index) => (
+                    <div key={`${log.time}-${index}`} className="border-b border-slate-900/80 pb-2 pt-2 first:pt-0 last:border-none">
+                      <div className="flex items-center gap-2 text-slate-500">
+                        <span>[{log.time}]</span>
+                        <span className="text-sky-400">[{log.module}]</span>
+                      </div>
+                      <div className={classNames('mt-1 leading-5', log.type === 'success' ? 'text-emerald-300' : log.type === 'warn' ? 'text-amber-300' : log.type === 'error' ? 'text-rose-300' : 'text-slate-300')}>
+                        {log.message}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-sm bg-yellow-500 shadow-[0_0_8px_#eab308]"></div>
-              <span className="text-slate-300">生长中期</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-sm bg-red-500 shadow-[0_0_8px_#ef4444]"></div>
-              <span className="text-slate-300">缺水 / 病害预警</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-sm bg-slate-700"></div>
-              <span className="text-slate-500">仓位空置</span>
-            </div>
-          </div>
+          </section>
         </div>
-      </div>
+      </main>
 
       <style
         dangerouslySetInnerHTML={{
-          __html: `
-            .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-            .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-            .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-
-            .topology-line-active {
-              animation: topologyDash 2.2s linear infinite;
-            }
-
-            .topology-pulse {
-              transform-origin: center;
-              animation: topologyPulse 1.4s ease-in-out infinite;
-            }
-
-            .topology-beacon {
-              animation: topologyBeacon 1.6s ease-in-out infinite;
-            }
-
-            @keyframes topologyDash {
-              to {
-                stroke-dashoffset: -18;
-              }
-            }
-
-            @keyframes topologyPulse {
-              0%, 100% {
-                opacity: 0.35;
-                transform: scale(1);
-              }
-              50% {
-                opacity: 1;
-                transform: scale(1.8);
-              }
-            }
-
-            @keyframes topologyBeacon {
-              0%, 100% {
-                transform: scale(1);
-                opacity: 0.9;
-              }
-              50% {
-                transform: scale(1.28);
-                opacity: 1;
-              }
-            }
-          `,
+          __html: `.glass-panel{display:flex;border-radius:1rem;border:1px solid rgba(51,65,85,.82);background:linear-gradient(180deg,rgba(15,23,42,.86),rgba(2,6,23,.78)),radial-gradient(circle at top,rgba(56,189,248,.08),transparent 35%);box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 24px 60px rgba(0,0,0,.28);backdrop-filter:blur(18px)}.custom-scrollbar::-webkit-scrollbar{width:6px}.custom-scrollbar::-webkit-scrollbar-thumb{background:#334155;border-radius:999px}.lcd-text{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;letter-spacing:.08em}.camera-scan-line{animation:cameraSweep 2.2s linear infinite}.virtual-edit-mode .topo-link-branch:hover{filter:brightness(1.45) drop-shadow(0 0 4px rgba(255,255,255,.65));transform:translateY(-1px)}input[type=range]{-webkit-appearance:none;appearance:none;background:transparent}input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:999px;background:linear-gradient(90deg,rgba(51,65,85,.95),rgba(71,85,105,.95))}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;margin-top:-5px;height:16px;width:16px;border-radius:999px;border:2px solid rgba(8,15,26,.95);background:linear-gradient(180deg,#7dd3fc,#38bdf8);box-shadow:0 0 0 4px rgba(56,189,248,.16)}@keyframes cameraSweep{0%{transform:translateY(-120%)}100%{transform:translateY(220%)}}`,
         }}
       />
     </div>
   );
 };
 
-const EnvData = ({ icon, val }: EnvDataProps) => (
-  <div className="flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5">
-    {icon}
-    <span className="font-mono text-sm text-slate-300">{val}</span>
-  </div>
-);
-
-const MetricCard = ({ label, value, tone }: MetricCardProps) => (
-  <div className={`rounded-xl border px-3 py-3 ${METRIC_STYLES[tone]}`}>
-    <div className="text-[11px] text-slate-400">{label}</div>
-    <div className="mt-1 text-lg font-semibold">{value}</div>
-  </div>
-);
-
-const StatusPill = ({ label, tone }: StatusPillProps) => (
-  <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${STATUS_PILL_STYLES[tone]}`}>
-    {label}
-  </div>
-);
-
-const TopologyNodeCard = ({ node }: TopologyNodeCardProps) => {
-  const meta = NODE_STATUS_META[node.status];
-
-  return (
-    <div
-      className="absolute w-[6.75rem] -translate-x-1/2 -translate-y-1/2"
-      style={{ left: `${node.x}%`, top: `${node.y}%` }}
-    >
-      <div className={`rounded-2xl border p-3 shadow-lg backdrop-blur-sm ${meta.border}`}>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] font-semibold tracking-[0.24em] text-slate-500">{node.short}</span>
-          <span className={`h-2.5 w-2.5 rounded-full ${meta.dot} ${node.status === 'active' ? 'topology-beacon' : ''}`}></span>
-        </div>
-        <div className="mt-2 text-sm font-semibold text-white">{node.label}</div>
-        <div className="mt-1 min-h-[2rem] text-[11px] leading-4 text-slate-400">{node.role}</div>
-        <div className={`mt-3 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${meta.text}`}>
-          {meta.label}
-        </div>
-      </div>
+const Header = ({ title, icon, accent = 'border-l-cyan-500', extra }: { title: string; icon: ReactNode; accent?: string; extra?: ReactNode }) => (
+  <div className={classNames('flex items-center justify-between gap-3 border-b border-slate-800/80 bg-gradient-to-r from-slate-900/95 to-slate-900/10 px-4 py-3 border-l-4', accent)}>
+    <div className="flex items-center gap-2">
+      {icon}
+      <span className="text-sm font-semibold tracking-[0.12em] text-slate-100">{title}</span>
     </div>
-  );
-};
+    {extra}
+  </div>
+);
 
-const LinkStatusRow = ({ link }: LinkStatusRowProps) => {
-  const meta = LINK_STATUS_META[link.status];
+const Node = ({ label, sub, tone, icon }: { label: string; sub: string; tone: NodeTone; icon: ReactNode }) => (
+  <div className={classNames('relative flex w-[7.6rem] flex-col items-center rounded-xl border p-3 text-center shadow-lg', NODE_TONE_META[tone].panel)}>
+    <span className={classNames('absolute -right-1.5 -top-1.5 h-3 w-3 rounded-full', NODE_TONE_META[tone].dot)} />
+    <div className="mb-2">{icon}</div>
+    <div className="text-xs font-semibold text-slate-100">{label}</div>
+    <div className="mt-1 text-[10px] text-slate-400">{sub}</div>
+  </div>
+);
 
-  return (
-    <div className="grid grid-cols-[auto,1fr,auto] items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/65 px-3 py-3">
-      <span className={`mt-1 h-2.5 w-2.5 rounded-full ${meta.dot}`}></span>
-      <div>
-        <div className="text-sm font-medium text-slate-200">{link.label}</div>
-        <div className="mt-1 text-xs leading-5 text-slate-400">{link.detail}</div>
-      </div>
-      <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span>
-    </div>
-  );
-};
+const Leaf = ({ label, tone, icon, onClick }: { label: string; tone: NodeTone; icon: ReactNode; onClick: () => void }) => (
+  <button onClick={onClick} className={classNames('relative flex w-[6.5rem] scale-[0.92] flex-col items-center rounded-xl border px-2 py-3 text-center shadow-lg transition-transform hover:-translate-y-0.5', NODE_TONE_META[tone].panel)}>
+    <span className={classNames('absolute -right-1.5 -top-1.5 h-3 w-3 rounded-full', NODE_TONE_META[tone].dot)} />
+    <div className="mb-2">{icon}</div>
+    <div className="text-[11px] font-semibold text-slate-100">{label}</div>
+    <div className="mt-1 text-[9px] text-slate-400">查看 / 编辑</div>
+  </button>
+);
 
 export default App;
