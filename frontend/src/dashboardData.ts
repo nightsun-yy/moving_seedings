@@ -19,7 +19,9 @@ export type SensorKey = 'temp' | 'hum' | 'co2' | 'light' | 'ec' | 'ph';
 export type MotorKey = 'x' | 'y' | 'cyl';
 export type CameraKey = 'cam1';
 export type DetailPanelKey = LinkKey;
-export type TrayId = `${1 | 2 | 3}-${1 | 2 | 3}`;
+export type TrayId = '1-1' | '1-2' | '1-3' | '2-1' | '2-2' | '2-3' | '3-1' | '3-2' | '3-3';
+export type TrayRow = 1 | 2 | 3;
+export type TrayCol = 1 | 2 | 3;
 
 export type AxisPosition = {
   x: number;
@@ -62,8 +64,8 @@ export type DetailItem = {
 
 export type TrayOption = {
   id: TrayId;
-  row: 1 | 2 | 3;
-  col: 1 | 2 | 3;
+  row: TrayRow;
+  col: TrayCol;
   label: string;
 };
 
@@ -84,27 +86,195 @@ export const AXIS_RANGE = {
 } as const;
 
 export const DISPLAY_AXIS_RANGE = {
-  x: { left: 588, right: 0 },
-  y: { bottom: 0, top: 300 },
+  x: { left: 0, right: 588 },
+  y: { bottom: 0, top: 348 },
 } as const;
 
 export const HOME_AXIS_POSITION: AxisPosition = {
-  x: AXIS_RANGE.x.max,
+  x: AXIS_RANGE.x.min,
   y: AXIS_RANGE.y.min,
 };
 
 export const WATER_STATION_COORDS = { x: -100, yBase: 14, yLift: 20 } as const;
 
+type CalibrationPoint = {
+  input: number;
+  output: number;
+};
+
+type TrayCalibration = TrayOption & TrayCoords & { displayX: number; displayY: number };
+
+const TRAY_CALIBRATION: Record<TrayId, TrayCalibration> = {
+  '1-1': {
+    id: '1-1',
+    row: 1,
+    col: 1,
+    label: '1层-1列',
+    displayX: 195,
+    displayY: 0,
+    x: -50,
+    yBase: 14,
+    yLift: 20,
+    rack3DX: -15,
+    rack3DY: 4.5,
+  },
+  '1-2': {
+    id: '1-2',
+    row: 1,
+    col: 2,
+    label: '1层-2列',
+    displayX: 390,
+    displayY: 0,
+    x: 0,
+    yBase: 14,
+    yLift: 20,
+    rack3DX: 0,
+    rack3DY: 4.5,
+  },
+  '1-3': {
+    id: '1-3',
+    row: 1,
+    col: 3,
+    label: '1层-3列',
+    displayX: 581.1,
+    displayY: 0,
+    x: 50,
+    yBase: 14,
+    yLift: 20,
+    rack3DX: 15,
+    rack3DY: 4.5,
+  },
+  '2-1': {
+    id: '2-1',
+    row: 2,
+    col: 1,
+    label: '2层-1列',
+    displayX: 195,
+    displayY: 172.3,
+    x: -50,
+    yBase: 54,
+    yLift: 60,
+    rack3DX: -15,
+    rack3DY: 16.5,
+  },
+  '2-2': {
+    id: '2-2',
+    row: 2,
+    col: 2,
+    label: '2层-2列',
+    displayX: 390,
+    displayY: 172.3,
+    x: 0,
+    yBase: 54,
+    yLift: 60,
+    rack3DX: 0,
+    rack3DY: 16.5,
+  },
+  '2-3': {
+    id: '2-3',
+    row: 2,
+    col: 3,
+    label: '2层-3列',
+    displayX: 581.1,
+    displayY: 172.3,
+    x: 50,
+    yBase: 54,
+    yLift: 60,
+    rack3DX: 15,
+    rack3DY: 16.5,
+  },
+  '3-1': {
+    id: '3-1',
+    row: 3,
+    col: 1,
+    label: '3层-1列',
+    displayX: 195,
+    displayY: 283,
+    x: -50,
+    yBase: 94,
+    yLift: 100,
+    rack3DX: -15,
+    rack3DY: 28.5,
+  },
+  '3-2': {
+    id: '3-2',
+    row: 3,
+    col: 2,
+    label: '3层-2列',
+    displayX: 390,
+    displayY: 283,
+    x: 0,
+    yBase: 94,
+    yLift: 100,
+    rack3DX: 0,
+    rack3DY: 28.5,
+  },
+  '3-3': {
+    id: '3-3',
+    row: 3,
+    col: 3,
+    label: '3层-3列',
+    displayX: 581.1,
+    displayY: 283,
+    x: 50,
+    yBase: 94,
+    yLift: 100,
+    rack3DX: 15,
+    rack3DY: 28.5,
+  },
+};
+
+const INTERNAL_DISPLAY_AXIS_POINTS: Record<'x' | 'y', readonly CalibrationPoint[]> = {
+  x: [
+    { input: HOME_AXIS_POSITION.x, output: DISPLAY_AXIS_RANGE.x.left },
+    { input: TRAY_CALIBRATION['1-1'].x, output: TRAY_CALIBRATION['1-1'].displayX },
+    { input: TRAY_CALIBRATION['1-2'].x, output: TRAY_CALIBRATION['1-2'].displayX },
+    { input: TRAY_CALIBRATION['1-3'].x, output: TRAY_CALIBRATION['1-3'].displayX },
+    { input: AXIS_RANGE.x.max, output: DISPLAY_AXIS_RANGE.x.right },
+  ],
+  y: [
+    { input: HOME_AXIS_POSITION.y, output: DISPLAY_AXIS_RANGE.y.bottom },
+    { input: TRAY_CALIBRATION['1-1'].yBase, output: TRAY_CALIBRATION['1-1'].displayY },
+    { input: TRAY_CALIBRATION['2-1'].yBase, output: TRAY_CALIBRATION['2-1'].displayY },
+    { input: TRAY_CALIBRATION['3-1'].yBase, output: TRAY_CALIBRATION['3-1'].displayY },
+    { input: AXIS_RANGE.y.max, output: DISPLAY_AXIS_RANGE.y.top },
+  ],
+};
+
+const DISPLAY_INTERNAL_AXIS_POINTS: Record<'x' | 'y', readonly CalibrationPoint[]> = {
+  x: [...INTERNAL_DISPLAY_AXIS_POINTS.x]
+    .map(({ input, output }) => ({ input: output, output: input }))
+    .sort((left, right) => left.input - right.input),
+  y: [...INTERNAL_DISPLAY_AXIS_POINTS.y]
+    .map(({ input, output }) => ({ input: output, output: input }))
+    .sort((left, right) => left.input - right.input),
+};
+
+const PYTHON_DISPLAY_AXIS_POINTS: Record<'x' | 'y', readonly CalibrationPoint[]> = {
+  x: [
+    { input: 261, output: 55.7 },
+    { input: 4141, output: 195 },
+    { input: 8021, output: 390 },
+    { input: 11901, output: 581.1 },
+  ],
+  y: [
+    { input: 0, output: 0 },
+    { input: 89, output: 0 },
+    { input: 3610, output: 172.3 },
+    { input: 7131, output: 283 },
+  ],
+};
+
 export const TRAY_OPTIONS: TrayOption[] = [
-  { id: '3-1', row: 3, col: 1, label: '3层-1列' },
-  { id: '3-2', row: 3, col: 2, label: '3层-2列' },
-  { id: '3-3', row: 3, col: 3, label: '3层-3列' },
-  { id: '2-1', row: 2, col: 1, label: '2层-1列' },
-  { id: '2-2', row: 2, col: 2, label: '2层-2列' },
-  { id: '2-3', row: 2, col: 3, label: '2层-3列' },
-  { id: '1-1', row: 1, col: 1, label: '1层-1列' },
-  { id: '1-2', row: 1, col: 2, label: '1层-2列' },
-  { id: '1-3', row: 1, col: 3, label: '1层-3列' },
+  TRAY_CALIBRATION['3-1'],
+  TRAY_CALIBRATION['3-2'],
+  TRAY_CALIBRATION['3-3'],
+  TRAY_CALIBRATION['2-1'],
+  TRAY_CALIBRATION['2-2'],
+  TRAY_CALIBRATION['2-3'],
+  TRAY_CALIBRATION['1-1'],
+  TRAY_CALIBRATION['1-2'],
+  TRAY_CALIBRATION['1-3'],
 ];
 
 export const SENSOR_CONFIG: SensorConfig[] = [
@@ -201,7 +371,7 @@ export const DETAIL_PANEL_DATA: Record<DetailPanelKey, { title: string; items: D
     ],
   },
   motors: {
-    title: '伺服网明细',
+    title: '执行机构明细',
     items: [
       { id: 'x', name: 'X轴', address: 'ID:1', Icon: MoveHorizontal },
       { id: 'y', name: 'Y轴', address: 'ID:2', Icon: MoveVertical },
@@ -229,18 +399,13 @@ export const formatTrayTarget = (trayId: TrayId) => {
 };
 
 export const getTrayCoords = (trayId: TrayId): TrayCoords => {
-  const [row, col] = trayId.split('-').map(Number) as [1 | 2 | 3, 1 | 2 | 3];
-  const uiYBases = [14, 54, 94];
-  const uiXs = [-50, 0, 50];
-  const rack3DXs = [-15, 0, 15];
-  const rack3DYs = [4.5, 16.5, 28.5];
-
+  const tray = TRAY_CALIBRATION[trayId];
   return {
-    x: uiXs[col - 1],
-    yBase: uiYBases[row - 1],
-    yLift: uiYBases[row - 1] + 6,
-    rack3DX: rack3DXs[col - 1],
-    rack3DY: rack3DYs[row - 1],
+    x: tray.x,
+    yBase: tray.yBase,
+    yLift: tray.yLift,
+    rack3DX: tray.rack3DX,
+    rack3DY: tray.rack3DY,
   };
 };
 
@@ -263,25 +428,62 @@ const interpolate = (
   return outputStart + ratio * (outputEnd - outputStart);
 };
 
-export const internalToDisplayAxis = (key: 'x' | 'y', value: number) => {
-  if (key === 'x') {
-    const clamped = clamp(value, AXIS_RANGE.x.min, AXIS_RANGE.x.max);
-    return interpolate(clamped, AXIS_RANGE.x.min, AXIS_RANGE.x.max, DISPLAY_AXIS_RANGE.x.left, DISPLAY_AXIS_RANGE.x.right);
+const interpolateByPoints = (value: number, points: readonly CalibrationPoint[]) => {
+  if (points.length === 0) {
+    return value;
   }
 
-  const clamped = clamp(value, AXIS_RANGE.y.min, AXIS_RANGE.y.max);
-  return interpolate(clamped, AXIS_RANGE.y.min, AXIS_RANGE.y.max, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top);
+  if (value <= points[0].input) {
+    return points[0].output;
+  }
+
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+
+    if (value <= end.input) {
+      return interpolate(value, start.input, end.input, start.output, end.output);
+    }
+  }
+
+  return points[points.length - 1].output;
+};
+
+const isOutsideCalibrationRange = (value: number, points: readonly CalibrationPoint[]) =>
+  value < points[0].input || value > points[points.length - 1].input;
+
+export const internalToDisplayAxis = (key: 'x' | 'y', value: number) => {
+  const clamped = clamp(value, AXIS_RANGE[key].min, AXIS_RANGE[key].max);
+  return interpolateByPoints(clamped, INTERNAL_DISPLAY_AXIS_POINTS[key]);
 };
 
 export const displayToInternalAxis = (key: 'x' | 'y', value: number) => {
   if (key === 'x') {
-    const clamped = clamp(value, DISPLAY_AXIS_RANGE.x.right, DISPLAY_AXIS_RANGE.x.left);
-    return interpolate(clamped, DISPLAY_AXIS_RANGE.x.left, DISPLAY_AXIS_RANGE.x.right, AXIS_RANGE.x.min, AXIS_RANGE.x.max);
+    const clamped = clamp(value, DISPLAY_AXIS_RANGE.x.left, DISPLAY_AXIS_RANGE.x.right);
+    return interpolateByPoints(clamped, DISPLAY_INTERNAL_AXIS_POINTS.x);
   }
 
   const clamped = clamp(value, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top);
-  return interpolate(clamped, DISPLAY_AXIS_RANGE.y.bottom, DISPLAY_AXIS_RANGE.y.top, AXIS_RANGE.y.min, AXIS_RANGE.y.max);
+  return interpolateByPoints(clamped, DISPLAY_INTERNAL_AXIS_POINTS.y);
 };
+
+export const pythonToDisplayAxis = (key: 'x' | 'y', value: number) => interpolateByPoints(value, PYTHON_DISPLAY_AXIS_POINTS[key]);
+
+export const pythonToInternalAxis = (key: 'x' | 'y', value: number) => {
+  if (key === 'x') {
+    return displayToInternalAxis('x', pythonToDisplayAxis('x', value));
+  }
+
+  return interpolateByPoints(value, [
+    { input: 0, output: HOME_AXIS_POSITION.y },
+    { input: 89, output: TRAY_CALIBRATION['1-1'].yBase },
+    { input: 3610, output: TRAY_CALIBRATION['2-1'].yBase },
+    { input: 7131, output: TRAY_CALIBRATION['3-1'].yBase },
+  ]);
+};
+
+export const isPythonAxisOutOfRange = (key: 'x' | 'y', value: number) =>
+  isOutsideCalibrationRange(value, PYTHON_DISPLAY_AXIS_POINTS[key]);
 
 export const createSensorSnapshot = (): SensorSnapshot =>
   SENSOR_CONFIG.reduce((snapshot, config) => {

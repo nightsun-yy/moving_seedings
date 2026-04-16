@@ -28,12 +28,13 @@ import {
   WATER_STATION_COORDS,
   clamp,
   createSensorSnapshot,
-  displayToInternalAxis,
   formatSensorValue,
   formatTrayTarget,
   getTimestamp,
   getTrayCoords,
   internalToDisplayAxis,
+  isPythonAxisOutOfRange,
+  pythonToInternalAxis,
   type AxisPosition,
   type CameraDeviceState,
   type CameraKey,
@@ -204,8 +205,7 @@ const App = () => {
     return true;
   };
 
-  const setTargetTray = (row: 1 | 2 | 3, col: 1 | 2 | 3, options?: { force?: boolean; skipLog?: boolean }) =>
-    setTargetTrayById(`${row}-${col}` as TrayId, options);
+  const setTargetTray = (trayId: TrayId, options?: { force?: boolean; skipLog?: boolean }) => setTargetTrayById(trayId, options);
 
   const smoothMoveTo = (targetX: number, targetY: number, duration = 1200) =>
     new Promise<void>((resolve) => {
@@ -693,14 +693,14 @@ const App = () => {
           }
         } else {
           const nextAxisX =
-            typeof snapshot.x === 'number' ? displayToInternalAxis('x', snapshot.x) : axisRef.current.x;
+            typeof snapshot.x === 'number' ? pythonToInternalAxis('x', snapshot.x) : axisRef.current.x;
           const nextAxisY =
-            typeof snapshot.y === 'number' ? displayToInternalAxis('y', snapshot.y) : axisRef.current.y;
+            typeof snapshot.y === 'number' ? pythonToInternalAxis('y', snapshot.y) : axisRef.current.y;
 
           setAxisState({ x: nextAxisX, y: nextAxisY });
 
           if (typeof snapshot.y === 'number') {
-            setYLimitWarning(snapshot.y < DISPLAY_AXIS_RANGE.y.bottom || snapshot.y > DISPLAY_AXIS_RANGE.y.top);
+            setYLimitWarning(isPythonAxisOutOfRange('y', snapshot.y));
           } else {
             setYLimitWarning(false);
           }
@@ -874,7 +874,7 @@ const App = () => {
                     <button
                       key={tray.id}
                       type="button"
-                      onClick={() => setTargetTray(tray.row, tray.col)}
+                      onClick={() => setTargetTray(tray.id)}
                       className={classNames(
                         'rounded py-1 text-[10px] transition-colors',
                         activeTrayId === tray.id
@@ -994,11 +994,11 @@ const App = () => {
             <div className="pointer-events-none absolute right-3 top-3 rounded border border-slate-600 bg-slate-900/75 px-2 py-1 font-mono text-[10px] text-cyan-300 backdrop-blur-sm">
               Y = {DISPLAY_AXIS_RANGE.y.top} mm
             </div>
-            <div className="pointer-events-none absolute bottom-3 left-3 rounded border border-slate-600 bg-slate-900/75 px-2 py-1 font-mono text-[10px] text-rose-300 backdrop-blur-sm">
-              X = {DISPLAY_AXIS_RANGE.x.left} mm
-            </div>
-            <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-cyan-500/60 bg-slate-900/80 px-2 py-1 font-mono text-[10px] text-cyan-200 shadow-lg backdrop-blur-sm">
+            <div className="pointer-events-none absolute bottom-3 left-3 rounded border border-cyan-500/60 bg-slate-900/80 px-2 py-1 font-mono text-[10px] text-cyan-200 shadow-lg backdrop-blur-sm">
               (0,0)
+            </div>
+            <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-slate-600 bg-slate-900/75 px-2 py-1 font-mono text-[10px] text-rose-300 backdrop-blur-sm">
+              X = {DISPLAY_AXIS_RANGE.x.right} mm
             </div>
 
             <div className="pointer-events-none absolute bottom-3 left-1/2 flex w-max -translate-x-1/2 items-center gap-2 rounded-full border border-slate-700 bg-slate-900/60 px-4 py-1.5 text-[11px] text-slate-300 shadow-lg backdrop-blur-sm">

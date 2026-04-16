@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { AXIS_RANGE, WATER_STATION_COORDS, getTrayCoords, type AxisPosition, type LogLevel, type TrayId } from './dashboardData';
+import { AXIS_RANGE, TRAY_OPTIONS, WATER_STATION_COORDS, getTrayCoords, type AxisPosition, type LogLevel, type TrayId } from './dashboardData';
 
 type SceneRef<T> = {
   current: T;
@@ -139,10 +139,11 @@ export const mountDashboardScene = ({
       rackGroup.add(rightSlide);
     });
 
-    [-15, 0, 15].forEach((trayX, columnIndex) => {
-      const trayId = `${layerIndex + 1}-${columnIndex + 1}` as TrayId;
+    TRAY_OPTIONS.filter((tray) => tray.row === layerIndex + 1).forEach((trayOption) => {
+      const trayId = trayOption.id;
+      const trayCoords = getTrayCoords(trayId);
       const trayGroup = new THREE.Group() as TrayGroup;
-      trayGroup.position.set(trayX, y, 0);
+      trayGroup.position.set(trayCoords.rack3DX, trayCoords.rack3DY, 0);
 
       const trayBase = new THREE.Mesh(new THREE.BoxGeometry(10, 0.5, 13), trayMat);
       trayBase.position.set(0, 0.75, 0);
